@@ -1,0 +1,14 @@
+Greenfield / reset (Supabase → SQL Editor):
+
+  1. Open and run the full contents of:  schema.sql
+
+That script DROPs public app tables (users, translation_jobs, profiles, jobs,
+usage, transactions), removes the profile-sync triggers/function on auth.users,
+then CREATEs everything fresh. auth.users is never dropped.
+
+Existing rows in those tables are deleted. After a reset, existing Auth users
+will not automatically get a profiles row until they are updated or you insert
+profiles manually (new signups still get rows via the INSERT trigger).
+
+Referrals: profiles.referral_* columns + public.referral_attributions. Tune
+REFERRAL_WORDS_PER_SIGNUP and REFERRAL_MAX_WORDS_EARNED_PER_REFERRER in backend .env.

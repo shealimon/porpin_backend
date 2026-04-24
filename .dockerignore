@@ -1,0 +1,11 @@
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.env
+.git
+*.md
+data
+tests
+load_test.py
+metrics.json

@@ -1,0 +1,2 @@
+Hello world. Short smoke test for translation pipeline.
+Unique run id: smoke-2026-04-15-agent-verify-7f3a9c2e
