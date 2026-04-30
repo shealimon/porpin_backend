@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+ListKind = Literal["bullet", "ordered"]
+
 
 class BlockType(StrEnum):
     HEADING = "heading"
@@ -42,6 +44,10 @@ class ContentBlock(BaseModel):
     structural_tag: StructuralTag | None = Field(
         default=None,
         description="Title page, author line(s), or TOC region; None for main body.",
+    )
+    list_kind: ListKind | None = Field(
+        default=None,
+        description="When type is list: bullet vs numbered (from source; optional).",
     )
     source_page: int | None = Field(
         default=None,

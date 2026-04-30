@@ -36,6 +36,10 @@ from app.jobs.chunk_queue import (
     try_mark_batch_failed,
 )
 from app.jobs.job_progress import publish_translation_progress
+from app.services.translation_target import (
+    normalize_translation_target,
+    translation_target_label,
+)
 from app.services.translator.batch_translator import (
     build_async_openai_client,
     translate_one_chunk_batch_async,
@@ -104,6 +108,8 @@ async def _process_one_payload(payload: str, openai_client: AsyncOpenAI) -> None
         batches_raw = manifest["batches"]
         total_batches = max(1, len(batches_raw))
         segments = list(manifest["segments"])
+        tt = normalize_translation_target(manifest.get("translation_target"))
+        tt_label = translation_target_label(tt)
         indices = [int(x) for x in batches_raw[bi]]
         chunk_texts = [segments[i] for i in indices]
         manifest_read_s = time.perf_counter() - t_manifest0
@@ -131,6 +137,8 @@ async def _process_one_payload(payload: str, openai_client: AsyncOpenAI) -> None
                     current_stage="chunk_translating",
                     batches_done=done_ct,
                     batches_total=t,
+                    translation_target=tt,
+                    translation_target_label=tt_label,
                 )
 
             translations, openai_pure_s = await translate_one_chunk_batch_async(
@@ -138,6 +146,7 @@ async def _process_one_payload(payload: str, openai_client: AsyncOpenAI) -> None
                 on_tokens=bump,
                 openai_client=openai_client,
                 on_translation_pulse=on_chunk_pulse,
+                translation_target=tt,
             )
             if len(translations) != len(indices):
                 raise RuntimeError("translation count mismatch")

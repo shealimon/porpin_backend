@@ -17,6 +17,7 @@ from app.db.session import get_session_factory
 from app.deps.quota import release_quota_slot_for_profile, reserve_quota_slot_for_profile
 from app.deps.supabase_auth import AuthProfile
 from app.jobs.rq_queue import enqueue_document_job, ensure_queue_capacity
+from app.services.translation_target import normalize_translation_target
 from app.utils.file_validation import (
     assert_allowed_filename,
     sha256_bytes,
@@ -77,6 +78,7 @@ def create_and_enqueue_job_from_bytes(
     *,
     deferred_payment: bool = False,
     payg_quote_inr: float | None = None,
+    translation_target: str = "hinglish",
 ) -> uuid.UUID:
     """Enqueue after body is already in memory (use ``await upload.read()`` in async routes)."""
     settings = get_pipeline_settings()
@@ -108,6 +110,7 @@ def create_and_enqueue_job_from_bytes(
     t_upload0 = time.perf_counter()
     validate_file_bytes(suffix, data, max_bytes=settings.max_upload_bytes)
     content_hash = sha256_bytes(data)
+    tt = normalize_translation_target(translation_target)
 
     with factory() as session:
         dup = session.execute(
@@ -183,6 +186,7 @@ def create_and_enqueue_job_from_bytes(
             failed.content_hash = content_hash
             failed.quoted_payg_inr = quote_snap  # type: ignore[assignment]
             failed.translation_attempt = 0
+            failed.translation_target = tt
         else:
             session.add(
                 DocumentJob(
@@ -196,6 +200,7 @@ def create_and_enqueue_job_from_bytes(
                     file_type=suffix.lstrip("."),
                     quoted_payg_inr=quote_snap,
                     translation_attempt=0,
+                    translation_target=tt,
                 )
             )
         try:

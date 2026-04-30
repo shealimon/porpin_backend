@@ -1,0 +1,98 @@
+/* Report: clean, professional, suitable for business PDFs */
+.doc-root.doc-theme--report {
+  --doc-fg: #0f172a;
+  --doc-bg: #ffffff;
+  --doc-border: #e2e8f0;
+  --doc-max: 48rem;
+  --doc-outer: clamp(1.5rem, 4vw, 2.5rem);
+  --doc-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+  font-family: var(--doc-sans);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.doc-root.doc-theme--report .doc-article {
+  max-width: var(--doc-max);
+  margin: 0 auto;
+  padding: var(--doc-outer);
+  box-sizing: border-box;
+  border: 1px solid var(--doc-border);
+  border-radius: 2px;
+  min-height: calc(100vh - 2 * var(--doc-outer));
+  margin-top: var(--doc-outer);
+  margin-bottom: var(--doc-outer);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.doc-root.doc-theme--report .doc-landmark {
+  border-bottom: 2px solid #0f172a;
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.doc-root.doc-theme--report .doc-title {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0;
+  color: #0f172a;
+  letter-spacing: -0.025em;
+}
+
+.doc-root.doc-theme--report .doc-heading--2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 1.75rem 0 0.5rem;
+  color: #1e293b;
+}
+
+.doc-root.doc-theme--report .doc-heading--3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 1.25rem 0 0.4rem;
+  color: #334155;
+}
+
+.doc-root.doc-theme--report .doc-paragraph {
+  margin: 0 0 0.9em;
+  color: #334155;
+}
+
+.doc-root.doc-theme--report .doc-list {
+  margin: 0.5rem 0 1.25rem 1.15rem;
+  padding: 0;
+  color: #334155;
+}
+
+.doc-root.doc-theme--report .doc-list-item {
+  margin-bottom: 0.35em;
+}
+
+.doc-root.doc-theme--report .doc-list-item::marker {
+  color: #64748b;
+}
+
+.doc-root.doc-theme--report .doc-heading--4 {
+  font-size: 0.98rem;
+  font-weight: 600;
+  margin: 1.1rem 0 0.35rem;
+  color: #475569;
+}
+
+.doc-root.doc-theme--report .doc-heading--5 {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin: 0.95rem 0 0.3rem;
+  color: #64748b;
+}
+
+.doc-root.doc-theme--report .doc-heading--6 {
+  font-size: 0.88rem;
+  font-weight: 600;
+  margin: 0.85rem 0 0.25rem;
+  color: #64748b;
+}

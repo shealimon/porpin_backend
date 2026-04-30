@@ -10,7 +10,7 @@ from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from app.models.document_models import BlockType, ContentBlock
+from app.models.document_models import BlockType, ContentBlock, ListKind
 
 
 def _word_count_str(s: str) -> int:
@@ -133,6 +133,13 @@ def _trim_table_block(block: ContentBlock, max_words: int) -> ContentBlock | Non
     return block.model_copy(update={"data": rows})
 
 
+def _infer_list_kind(text: str) -> ListKind:
+    first_line = (text or "").lstrip().split("\n", 1)[0].lstrip()
+    if re.match(r"^\d+[\.)]\s+", first_line):
+        return "ordered"
+    return "bullet"
+
+
 def _paragraph_to_block(para: Paragraph) -> ContentBlock | None:
     text = para.text.strip()
     if not text:
@@ -142,7 +149,11 @@ def _paragraph_to_block(para: Paragraph) -> ContentBlock | None:
         level = _heading_level_from_style(para.style.name)
         return ContentBlock(type=BlockType.HEADING, text=text, level=level)
     if para._p.pPr is not None and para._p.pPr.numPr is not None:
-        return ContentBlock(type=BlockType.LIST, text=text)
+        return ContentBlock(
+            type=BlockType.LIST,
+            text=text,
+            list_kind=_infer_list_kind(text),
+        )
     return ContentBlock(type=BlockType.PARAGRAPH, text=text)
 
 

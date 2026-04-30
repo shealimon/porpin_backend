@@ -90,13 +90,20 @@ def dump_manifest_v2(
     segments: list[str],
     batches: list[list[int]],
     block_work: list[BlockWork],
+    document_template_id: str | None = None,
+    translation_target: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "version": 2,
         "segments": segments,
         "batches": batches,
         "block_work": [block_work_to_jsonable(w) for w in block_work],
     }
+    if document_template_id and str(document_template_id).strip():
+        d["document_template_id"] = str(document_template_id).strip()
+    if translation_target and str(translation_target).strip():
+        d["translation_target"] = str(translation_target).strip().lower()
+    return d
 
 
 def load_manifest_v2(data: dict[str, Any]) -> tuple[list[str], list[list[int]], list[BlockWork]]:

@@ -11,7 +11,23 @@ import fitz
 from docx import Document
 from fastapi import HTTPException, UploadFile
 
-_ALLOWED_SUFFIXES = frozenset({".pdf", ".docx", ".epub", ".txt"})
+_ALLOWED_SUFFIXES = frozenset(
+    {
+        ".pdf",
+        ".docx",
+        ".epub",
+        ".ebup",
+        ".txt",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".tiff",
+        ".tif",
+        ".gif",
+        ".bmp",
+    }
+)
 
 
 def assert_allowed_filename(filename: str | None) -> str:
@@ -21,7 +37,7 @@ def assert_allowed_filename(filename: str | None) -> str:
     if suffix not in _ALLOWED_SUFFIXES:
         raise HTTPException(
             status_code=415,
-            detail="Only PDF, DOCX, EPUB, and TXT uploads are supported.",
+            detail="Supported uploads: PDF, DOCX, EPUB, TXT, and common image formats (PNG, JPEG, WebP, TIFF, etc.).",
         )
     return suffix
 
@@ -42,10 +58,12 @@ def validate_file_bytes(suffix: str, data: bytes, *, max_bytes: int) -> None:
         _validate_pdf(data)
     elif suffix == ".docx":
         _validate_docx(data)
-    elif suffix == ".epub":
+    elif suffix in {".epub", ".ebup"}:
         _validate_epub(data)
     elif suffix == ".txt":
         _validate_txt(data)
+    elif suffix in {".png", ".jpg", ".jpeg", ".webp", ".tiff", ".tif", ".gif", ".bmp"}:
+        _validate_image_raster(data)
 
 
 def _validate_pdf(data: bytes) -> None:
@@ -92,6 +110,21 @@ def _validate_txt(data: bytes) -> None:
             status_code=400,
             detail="TXT must be valid UTF-8.",
         ) from e
+
+
+def _validate_image_raster(data: bytes) -> None:
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="Image uploads require Pillow on the server.",
+        ) from e
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.verify()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Corrupted or invalid image file.") from e
 
 
 async def read_upload_bytes(file: UploadFile) -> bytes:

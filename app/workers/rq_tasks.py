@@ -35,14 +35,24 @@ from app.observability.pipeline_performance import (
     merge_redis_perf_strings,
 )
 from app.services.document_chunk_prepare import prepare_document_chunk_jobs
+from app.services.document_template_render import resolve_template_type
 from app.services.parser import parse_document
 from app.services.pipeline_runner import (
     estimate_input_tokens_from_blocks,
     run_pipeline,
-    try_convert_docx_to_pdf,
     write_translated_docx,
 )
+from app.services.structured_document_builder import (
+    build_structured_document,
+    structured_json_path_for_docx,
+)
+from app.services.translation_pdf_export import export_translation_pdf
 from app.services.translation_plan_serde import load_manifest_v2
+from app.services.translation_target import (
+    download_stem_label,
+    normalize_translation_target,
+    translation_target_label,
+)
 from app.services.word_credits import (
     add_usage_row,
     apply_word_charge,
@@ -50,7 +60,10 @@ from app.services.word_credits import (
     refresh_subscription_expiry,
 )
 from app.utils.chunking import count_tokens
-from app.utils.translation_output_filenames import translation_output_filename
+from app.utils.translation_output_filenames import (
+    translation_output_filename,
+    translation_structure_output_filename,
+)
 from app.utils.zip_export import write_translation_zip
 
 logger = logging.getLogger(__name__)
@@ -166,6 +179,7 @@ def prepare_document_translation_job(job_id: str) -> None:
             logger.info("Job %s already completed; prepare skip", job_id)
             return
 
+        tt = normalize_translation_target(getattr(job, "translation_target", None))
         job.status = JobStatus.PROCESSING.value
         session.commit()
 
@@ -177,6 +191,8 @@ def prepare_document_translation_job(job_id: str) -> None:
                 str(job_id),
                 progress_percent=8,
                 current_stage="preparing",
+                translation_target=tt,
+                translation_target_label=translation_target_label(tt),
             )
             rq_wait_s = 0.0
             if job.created_at is not None:
@@ -224,6 +240,7 @@ def prepare_document_translation_job(job_id: str) -> None:
                 input_path=input_path,
                 job_dir=job_dir,
                 blocks=blocks,
+                translation_target=tt,
             )
             perf_map: dict[str, str] = {
                 "rq_queue_wait_estimate_s": f"{rq_wait_s:.6f}",
@@ -266,6 +283,8 @@ def prepare_document_translation_job(job_id: str) -> None:
                 batches_total=max(1, num_batches) if num_batches else 1,
                 segments_translated=0,
                 segments_total=seg_total,
+                translation_target=tt,
+                translation_target_label=translation_target_label(tt),
             )
             if num_batches == 0:
                 publish_translation_progress(
@@ -336,6 +355,10 @@ def finalize_document_translation_job(job_id: str) -> None:
             return
 
         raw_man = json.loads(manifest_path.read_text(encoding="utf-8"))
+        _tpl_raw = raw_man.get("document_template_id")
+        doc_template_id = (
+            str(_tpl_raw).strip() if _tpl_raw is not None and str(_tpl_raw).strip() else None
+        )
         segments, batches, block_work = load_manifest_v2(raw_man)
         total, ok, fail = get_job_chunk_counters(job_id)
 
@@ -394,13 +417,21 @@ def finalize_document_translation_job(job_id: str) -> None:
             total_tokens_used = usage_sum
 
             upload_name = job.input_filename or "upload"
-            final_docx = job_dir / translation_output_filename(upload_name, "docx")
+            tt = normalize_translation_target(getattr(job, "translation_target", None))
+            ol = download_stem_label(tt)
+            final_docx = job_dir / translation_output_filename(
+                upload_name, "docx", output_language=ol
+            )
+            final_structure = job_dir / translation_structure_output_filename(
+                upload_name, output_language=ol
+            )
             t_write = time.perf_counter()
             write_translated_docx(
                 input_path,
                 block_work=block_work,
                 translated_segments=merged,
                 output_docx=final_docx,
+                structured_json_path=final_structure,
             )
             docx_s = time.perf_counter() - t_write
             logger.info(
@@ -409,23 +440,48 @@ def finalize_document_translation_job(job_id: str) -> None:
                 job_id,
             )
 
+            source_structured = None
+            if resolve_template_type(doc_template_id) == "bilingual":
+                source_structured = build_structured_document(
+                    [w.classified for w in block_work],
+                )
+
             export = job.export_format.lower()
             pdf_s = 0.0
             if export == "pdf":
                 t_pdf = time.perf_counter()
-                pdf_path = try_convert_docx_to_pdf(final_docx)
+                pdf_path = export_translation_pdf(
+                    final_docx,
+                    final_structure,
+                    template_id=doc_template_id,
+                    source_structured=source_structured,
+                )
                 pdf_s = time.perf_counter() - t_pdf
                 rel = pdf_path.relative_to(settings.data_dir)
                 job.output_file_path = str(rel).replace("\\", "/")
             elif export == "both":
                 t_pdf = time.perf_counter()
-                pdf_path = try_convert_docx_to_pdf(final_docx)
+                pdf_path = export_translation_pdf(
+                    final_docx,
+                    final_structure,
+                    template_id=doc_template_id,
+                    source_structured=source_structured,
+                )
                 pdf_s = time.perf_counter() - t_pdf
-                zip_path = job_dir / translation_output_filename(upload_name, "zip")
+                zip_path = job_dir / translation_output_filename(
+                    upload_name, "zip", output_language=ol
+                )
                 write_translation_zip(
                     {
-                        translation_output_filename(upload_name, "docx"): final_docx,
-                        translation_output_filename(upload_name, "pdf"): pdf_path,
+                        translation_output_filename(
+                            upload_name, "docx", output_language=ol
+                        ): final_docx,
+                        translation_output_filename(
+                            upload_name, "pdf", output_language=ol
+                        ): pdf_path,
+                        translation_structure_output_filename(
+                            upload_name, output_language=ol
+                        ): final_structure,
                     },
                     zip_path,
                 )
@@ -617,6 +673,7 @@ def process_document_job(job_id: str) -> None:
             logger.info("Job %s already completed; idempotent skip", job_id)
             return
 
+        tt = normalize_translation_target(getattr(job, "translation_target", None))
         job.status = JobStatus.PROCESSING.value
         session.commit()
 
@@ -656,23 +713,42 @@ def process_document_job(job_id: str) -> None:
                 on_tokens=on_tokens,
                 progress_job_id=str(job_id),
                 perf_report=perf,
+                translation_target=tt,
             )
             upload_name = job.input_filename or "upload"
-            final_docx = job_dir / translation_output_filename(upload_name, "docx")
+            ol = download_stem_label(tt)
+            final_docx = job_dir / translation_output_filename(
+                upload_name, "docx", output_language=ol
+            )
+            struct_tmp = structured_json_path_for_docx(docx_out)
+            final_structure = job_dir / translation_structure_output_filename(
+                upload_name, output_language=ol
+            )
             shutil.move(str(docx_out), str(final_docx))
+            if struct_tmp.is_file():
+                shutil.move(str(struct_tmp), str(final_structure))
 
             export = job.export_format.lower()
             if export == "pdf":
-                pdf_path = try_convert_docx_to_pdf(final_docx)
+                pdf_path = export_translation_pdf(final_docx, final_structure)
                 rel = pdf_path.relative_to(settings.data_dir)
                 job.output_file_path = str(rel).replace("\\", "/")
             elif export == "both":
-                pdf_path = try_convert_docx_to_pdf(final_docx)
-                zip_path = job_dir / translation_output_filename(upload_name, "zip")
+                pdf_path = export_translation_pdf(final_docx, final_structure)
+                zip_path = job_dir / translation_output_filename(
+                    upload_name, "zip", output_language=ol
+                )
                 write_translation_zip(
                     {
-                        translation_output_filename(upload_name, "docx"): final_docx,
-                        translation_output_filename(upload_name, "pdf"): pdf_path,
+                        translation_output_filename(
+                            upload_name, "docx", output_language=ol
+                        ): final_docx,
+                        translation_output_filename(
+                            upload_name, "pdf", output_language=ol
+                        ): pdf_path,
+                        translation_structure_output_filename(
+                            upload_name, output_language=ol
+                        ): final_structure,
                     },
                     zip_path,
                 )

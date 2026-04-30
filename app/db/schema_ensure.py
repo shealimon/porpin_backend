@@ -44,6 +44,7 @@ _JOBS_COLUMNS: dict[str, str] = {
     "updated_at": "TIMESTAMP WITH TIME ZONE",
     "quoted_payg_inr": "NUMERIC(10, 2) NOT NULL DEFAULT 0",
     "translation_attempt": "INTEGER NOT NULL DEFAULT 0",
+    "translation_target": "VARCHAR(16) NOT NULL DEFAULT 'hinglish'",
 }
 
 _USAGE_COLUMNS: dict[str, str] = {

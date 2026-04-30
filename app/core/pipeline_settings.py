@@ -182,6 +182,15 @@ class PipelineSettings(BaseSettings):
         default=True,
         description="For DOCX input, write translations back into the source file (keeps styles).",
     )
+    docx_rebuild_from_structure: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("DOCX_REBUILD_FROM_STRUCTURE"),
+        description=(
+            "When True (non-in-place rebuild only), emit DOCX from StructuredDocument via "
+            "structured_docx_builder. Set false to use the legacy python-docx path from "
+            "ClassifiedBlock list (rollback / A-B comparison)."
+        ),
+    )
     pdf_use_pdfplumber_for_tables: bool = Field(
         default=False,
         description=(

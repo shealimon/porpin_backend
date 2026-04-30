@@ -25,6 +25,7 @@ from app.services.razorpay_standard_checkout import (
 from app.services.payment_capture import apply_razorpay_captured_order
 from app.services.referral_lifecycle import try_referrer_payout_after_referee_event
 from app.services.razorpay_webhook import _resolve_period_bounds
+from app.services.profile_inr_credit import record_razorpay_payment_transaction
 from app.services.word_credits import (
     activate_subscription_billing,
     set_legacy_api_user_subscription_tier,
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
 _MIN_CAPTURE_ORDER_INR = 1.0
+_YEARLY_SUBSCRIPTION_INR = 9990.0
+_TX_KIND_YEARLY = "yearly_subscription"
 
 
 def _razorpay_keyvals_from_env_file() -> dict[str, str]:
@@ -130,6 +133,21 @@ class RazorpayVerifyCapturedPayment(BaseModel):
 
 class RazorpayPaygTranslationOrderCreate(BaseModel):
     job_id: uuid.UUID
+
+
+class RazorpayYearlyOrderCreateResult(BaseModel):
+    order_id: str
+    key_id: str
+    amount_inr: float
+    amount_paise: int
+    currency: str = "INR"
+
+
+class RazorpayVerifyYearlyResult(BaseModel):
+    ok: bool
+    already_applied: bool
+    plan: str
+    subscription_active: bool
 
 
 async def handle_razorpay_webhook(request: Request) -> dict:
@@ -321,6 +339,135 @@ def razorpay_verify_captured_payment(
         "job_activated": res.job_activated,
         "job_id": str(res.job_id) if res.job_id else None,
     }
+
+
+@router.post("/razorpay/create-yearly-order", response_model=RazorpayYearlyOrderCreateResult)
+def razorpay_create_yearly_order(
+    profile=Depends(require_auth_profile_flexible),
+):
+    """Create a one-time Razorpay order for the yearly plan (supports UPI QR scan).
+
+    Unlike subscription checkout, standard order checkout reliably supports UPI "scan & pay".
+    Server verifies capture and activates the yearly plan.
+    """
+    client, key_id = get_razorpay_client()
+    if client is None or not key_id:
+        raise HTTPException(
+            status_code=503,
+            detail="Razorpay is not configured (set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET).",
+        )
+    amount_inr = round(float(_YEARLY_SUBSCRIPTION_INR), 2)
+    if amount_inr < _MIN_CAPTURE_ORDER_INR:
+        raise HTTPException(status_code=500, detail="Yearly plan amount is invalid.")
+    amount_paise = int(round(amount_inr * 100))
+    receipt = f"ys{profile.id.hex[:32]}"[:40]
+    try:
+        order = client.order.create(
+            {
+                "amount": amount_paise,
+                "currency": "INR",
+                "receipt": receipt,
+                "notes": {
+                    "profile_id": str(profile.id),
+                    "kind": _TX_KIND_YEARLY,
+                },
+            }
+        )
+    except Exception as e:
+        logger.exception("razorpay order.create (yearly) failed profile_id=%s", profile.id)
+        raise HTTPException(status_code=502, detail=f"Razorpay error: {e}") from e
+    oid = order.get("id")
+    if not oid:
+        raise HTTPException(status_code=502, detail="Razorpay returned no order id.")
+    return RazorpayYearlyOrderCreateResult(
+        order_id=str(oid),
+        key_id=str(key_id),
+        amount_inr=amount_inr,
+        amount_paise=amount_paise,
+        currency="INR",
+    )
+
+
+@router.post("/razorpay/verify-yearly-payment", response_model=RazorpayVerifyYearlyResult)
+def razorpay_verify_yearly_payment(
+    body: RazorpayVerifyCapturedPayment,
+    profile=Depends(require_auth_profile_flexible),
+):
+    """Verify a captured Razorpay order payment and activate the yearly plan (idempotent)."""
+    client, _ = get_razorpay_client()
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Razorpay is not configured (set RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET).",
+        )
+
+    params = {
+        "razorpay_order_id": body.razorpay_order_id,
+        "razorpay_payment_id": body.razorpay_payment_id,
+        "razorpay_signature": body.razorpay_signature,
+    }
+    try:
+        client.utility.verify_payment_signature(params)
+    except Exception as e:
+        logger.warning("razorpay signature verify failed (yearly): %s", e)
+        raise HTTPException(status_code=400, detail="Payment verification failed.") from e
+
+    try:
+        pay = client.payment.fetch(body.razorpay_payment_id)
+        order = client.order.fetch(body.razorpay_order_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Razorpay fetch failed: {e}") from e
+
+    if not isinstance(pay, dict) or str(pay.get("order_id") or "") != str(body.razorpay_order_id):
+        raise HTTPException(status_code=400, detail="Payment does not match order.")
+    status = str(pay.get("status") or "")
+    if status != "captured":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payment not captured yet (status: {status or 'unknown'}).",
+        )
+    onotes = order.get("notes") if isinstance(order.get("notes"), dict) else {}
+    if str(onotes.get("kind") or "") != _TX_KIND_YEARLY or str(onotes.get("profile_id") or "") != str(profile.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Order is not a yearly plan payment for this account.",
+        )
+    try:
+        amount_inr = int(pay["amount"]) / 100.0
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(status_code=502, detail="Invalid payment amount.") from e
+
+    factory = get_session_factory()
+    if factory is None:
+        raise HTTPException(status_code=503, detail="Database is not configured.")
+
+    inserted = record_razorpay_payment_transaction(
+        profile_id=profile.id,
+        payment_id=body.razorpay_payment_id,
+        amount_inr=amount_inr,
+        kind=_TX_KIND_YEARLY,
+        provider="razorpay",
+        razorpay_order_id=body.razorpay_order_id,
+    )
+
+    with factory() as session:
+        row = session.get(Profile, profile.id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Profile not found.")
+        # Activate regardless of whether the tx row already existed (safe/idempotent activation).
+        activate_subscription_billing(row, kind="yearly")
+        set_legacy_api_user_subscription_tier(session, row.id, subscribed=True)
+        session.commit()
+        session.refresh(row)
+        plan_slug = str(row.plan)
+        sub_active = bool(row.subscription_active)
+
+    return RazorpayVerifyYearlyResult(
+        ok=True,
+        already_applied=not inserted,
+        plan=plan_slug,
+        subscription_active=sub_active,
+    )
 
 
 @router.post("/razorpay/sync-subscription-after-checkout")

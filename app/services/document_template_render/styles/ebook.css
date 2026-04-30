@@ -1,0 +1,106 @@
+/* Ebook: serif, generous margins, print-oriented rhythm */
+.doc-root.doc-theme--ebook {
+  --doc-fg: #1c1917;
+  --doc-bg: #faf8f5;
+  --doc-muted: #57534e;
+  --doc-accent: #78350f;
+  --doc-max: 40rem;
+  --doc-outer: clamp(2rem, 6vw, 4rem);
+  --doc-serif: "Georgia", "Times New Roman", "Times", serif;
+  margin: 0;
+  min-height: 100vh;
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+  font-family: var(--doc-serif);
+  line-height: 1.7;
+  font-size: 1.0625rem;
+  -webkit-font-smoothing: antialiased;
+}
+
+.doc-root.doc-theme--ebook .doc-article {
+  max-width: var(--doc-max);
+  margin: 0 auto;
+  padding: var(--doc-outer) var(--doc-outer) calc(var(--doc-outer) * 1.5);
+  box-sizing: border-box;
+}
+
+.doc-root.doc-theme--ebook .doc-title {
+  font-size: clamp(1.75rem, 2.4vw, 2.25rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0 0 0.5rem;
+  color: var(--doc-fg);
+  font-family: var(--doc-serif);
+}
+
+.doc-root.doc-theme--ebook .doc-landmark::after {
+  content: "";
+  display: block;
+  width: 3rem;
+  height: 2px;
+  background: var(--doc-accent);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  opacity: 0.85;
+}
+
+.doc-root.doc-theme--ebook .doc-heading {
+  font-weight: 600;
+  color: #292524;
+  font-family: var(--doc-serif);
+  margin-top: 2rem;
+  margin-bottom: 0.75rem;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+.doc-root.doc-theme--ebook .doc-heading--2 {
+  font-size: 1.35rem;
+  border: none;
+}
+
+.doc-root.doc-theme--ebook .doc-heading--3 {
+  font-size: 1.15rem;
+  font-style: italic;
+  font-weight: 500;
+  color: var(--doc-muted);
+}
+
+.doc-root.doc-theme--ebook .doc-paragraph {
+  margin: 0 0 1.1em;
+  text-align: justify;
+  hyphens: auto;
+  color: #292524;
+}
+
+.doc-root.doc-theme--ebook .doc-list {
+  margin: 0.75rem 0 1.5rem 1.25rem;
+  padding: 0;
+  color: #44403c;
+}
+
+.doc-root.doc-theme--ebook .doc-list-item {
+  margin-bottom: 0.45em;
+  padding-left: 0.25em;
+}
+
+.doc-root.doc-theme--ebook .doc-list-item::marker {
+  color: var(--doc-accent);
+}
+
+.doc-root.doc-theme--ebook .doc-heading--4 {
+  font-size: 1.05rem;
+  margin-top: 1.5rem;
+}
+
+.doc-root.doc-theme--ebook .doc-heading--5 {
+  font-size: 1rem;
+  margin-top: 1.25rem;
+}
+
+.doc-root.doc-theme--ebook .doc-heading--6 {
+  font-size: 0.95rem;
+  margin-top: 1.1rem;
+  color: var(--doc-muted);
+}

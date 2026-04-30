@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <style>
+{{ css|safe }}
+    </style>
+  </head>
+  <body class="doc-root doc-theme--{{ themeId }}{% if bilingual_pairs is defined %} doc-root--bilingual{% endif %}">
+    <article class="doc-article">
+{% if bilingual_pairs is defined %}
+{% include "_body_bilingual.j2" %}
+{% else %}
+{% include "_body.j2" %}
+{% endif %}
+    </article>
+  </body>
+</html>

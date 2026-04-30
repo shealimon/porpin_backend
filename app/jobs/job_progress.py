@@ -28,6 +28,8 @@ def publish_translation_progress(
     batches_total: int | None = None,
     segments_translated: int | None = None,
     segments_total: int | None = None,
+    translation_target: str | None = None,
+    translation_target_label: str | None = None,
 ) -> None:
     settings = get_pipeline_settings()
     if not settings.redis_url:
@@ -73,6 +75,10 @@ def publish_translation_progress(
             payload["segments_translated"] = int(segments_translated)
         if segments_total is not None:
             payload["segments_total"] = int(segments_total)
+        if translation_target is not None:
+            payload["translation_target"] = str(translation_target)
+        if translation_target_label is not None:
+            payload["translation_target_label"] = str(translation_target_label)
         r.set(k, json.dumps(payload), ex=_PROGRESS_TTL_SEC)
     except Exception:
         logger.debug("publish_translation_progress failed for job %s", job_id, exc_info=True)

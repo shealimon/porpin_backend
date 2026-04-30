@@ -1,0 +1,97 @@
+/* Bilingual: report-like single column defaults; rows are two-column source/target */
+.doc-root.doc-theme--bilingual {
+  --doc-fg: #0f172a;
+  --doc-bg: #ffffff;
+  --doc-border: #e2e8f0;
+  --doc-muted: #64748b;
+  --doc-max: 56rem;
+  --doc-outer: clamp(1.25rem, 3vw, 2rem);
+  --doc-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+  font-family: var(--doc-sans);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+.doc-root.doc-theme--bilingual .doc-article {
+  max-width: var(--doc-max);
+  margin: 0 auto;
+  padding: var(--doc-outer);
+  box-sizing: border-box;
+}
+
+.doc-root.doc-theme--bilingual .doc-landmark {
+  border-bottom: 2px solid #0f172a;
+  padding-bottom: 0.85rem;
+  margin-bottom: 1.25rem;
+}
+
+.doc-root.doc-theme--bilingual .doc-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.doc-root.doc-theme--bilingual .doc-bilingual-row {
+  display: flex;
+  gap: 0;
+  margin: 0 0 1rem;
+  break-inside: avoid;
+  page-break-inside: avoid;
+  border-bottom: 1px solid var(--doc-border);
+  padding-bottom: 0.85rem;
+}
+
+.doc-root.doc-theme--bilingual .doc-bilingual-col {
+  flex: 1;
+  min-width: 0;
+  padding: 0 0.65rem;
+}
+
+.doc-root.doc-theme--bilingual .doc-bilingual-col--source {
+  color: var(--doc-muted);
+  border-right: 1px solid var(--doc-border);
+  font-size: 0.92em;
+}
+
+.doc-root.doc-theme--bilingual .doc-bilingual-col--target {
+  color: var(--doc-fg);
+}
+
+.doc-root.doc-theme--bilingual .doc-heading--2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0.35rem 0 0.35rem;
+}
+
+.doc-root.doc-theme--bilingual .doc-heading--3 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0.3rem 0 0.3rem;
+}
+
+.doc-root.doc-theme--bilingual .doc-heading--4,
+.doc-root.doc-theme--bilingual .doc-heading--5,
+.doc-root.doc-theme--bilingual .doc-heading--6 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0.25rem 0 0.25rem;
+}
+
+.doc-root.doc-theme--bilingual .doc-paragraph {
+  margin: 0 0 0.65em;
+}
+
+.doc-root.doc-theme--bilingual .doc-list {
+  margin: 0.25rem 0 0.65rem 1rem;
+  padding: 0;
+}
+
+.doc-root.doc-theme--bilingual .doc-list-item {
+  margin-bottom: 0.3em;
+}

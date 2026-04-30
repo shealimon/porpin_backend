@@ -23,6 +23,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.api.routes import billing as billing_routes
+from app.api.routes import document_pdf as document_pdf_routes
 from app.api.routes import download as download_routes
 from app.api.routes import translate as translate_routes
 from app.api.routes import jobs as jobs_routes
@@ -88,6 +89,20 @@ async def lifespan(app: FastAPI):
     except IntegrityError as e:
         logger.error("Seed user failed (database constraint): %s", e)
 
+    try:
+        from app.services.document_template_render import init_document_template_render
+        from app.services.formatter.html_to_pdf_weasyprint import (
+            warm_weasyprint_static_caches,
+        )
+
+        def _prewarm_doc_generation() -> None:
+            init_document_template_render()
+            warm_weasyprint_static_caches()
+
+        await asyncio.to_thread(_prewarm_doc_generation)
+    except Exception as e:
+        logger.warning("Document template prewarm failed (first PDF/HTML request may be slower): %s", e)
+
     async def _cleanup_loop() -> None:
         while True:
             await asyncio.sleep(900)
@@ -130,7 +145,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Porpin",
         version="1.0.0",
-        description="Upload PDF, DOCX, or TXT; receive Hinglish DOCX / PDF / ZIP. Optional async jobs with Postgres + Redis.",
+        description="Upload PDF, DOCX, EPUB, or TXT; receive Hinglish DOCX / PDF / ZIP. Optional async jobs with Postgres + Redis.",
         lifespan=lifespan,
         openapi_tags=[
             {
@@ -197,6 +212,7 @@ def create_app() -> FastAPI:
     app.include_router(billing_routes.router)
     app.include_router(referrals_routes.router)
     app.include_router(translate_routes.router, tags=["translate"])
+    app.include_router(document_pdf_routes.router)
     app.include_router(jobs_routes.router)
     app.include_router(download_routes.router)
     app.include_router(webhooks_routes.router, tags=["webhooks"])

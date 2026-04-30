@@ -25,6 +25,7 @@ from app.models.document_models import ContentBlock
 from app.services.parser import parse_document
 from app.services.translation_plan import build_translation_plan
 from app.services.translation_plan_serde import dump_manifest_v2, manifest_json_bytes
+from app.services.translation_target import normalize_translation_target
 from app.services.classifier.section_classifier import classify_blocks
 from app.utils.token_batching import pack_segment_indices_by_tokens
 from app.utils.word_batching import pack_segment_indices_by_words
@@ -73,6 +74,8 @@ def _inline_translate_batches(
     job_dir: Path,
     segments: list[str],
     batches: list[list[int]],
+    *,
+    translation_target: str,
 ) -> float:
     """Translate batches in-process with asyncio concurrency (same global inflight as chunk_worker).
 
@@ -82,7 +85,9 @@ def _inline_translate_batches(
     Returns wall seconds for the inline translation phase.
     """
     return asyncio.run(
-        _inline_translate_batches_async(job_id, job_dir, segments, batches)
+        _inline_translate_batches_async(
+            job_id, job_dir, segments, batches, translation_target=translation_target
+        )
     )
 
 
@@ -91,6 +96,8 @@ async def _inline_translate_batches_async(
     job_dir: Path,
     segments: list[str],
     batches: list[list[int]],
+    *,
+    translation_target: str,
 ) -> float:
     from app.services.translator.batch_translator import translate_one_chunk_batch_async
 
@@ -119,7 +126,9 @@ async def _inline_translate_batches_async(
                 await asyncio.sleep(settings.chunk_inflight_spin_seconds)
             try:
                 translations, _dt = await translate_one_chunk_batch_async(
-                    texts, on_tokens=_bump
+                    texts,
+                    on_tokens=_bump,
+                    translation_target=translation_target,
                 )
             finally:
                 await asyncio.to_thread(release_global_inflight)
@@ -166,6 +175,8 @@ def prepare_document_chunk_jobs(
     input_path: Path,
     job_dir: Path,
     blocks: list[ContentBlock] | None = None,
+    document_template_id: str | None = None,
+    translation_target: str = "hinglish",
 ) -> tuple[int, float, dict[str, float]]:
     """
     Build ``work/manifest.json``, push chunk messages to Redis, init counters.
@@ -212,6 +223,7 @@ def prepare_document_chunk_jobs(
             logger.exception("prepare repair failed job=%s; rebuilding", job_id)
 
     settings = get_pipeline_settings()
+    tt = normalize_translation_target(translation_target)
     if blocks is not None:
         breakdown["parse_second_document_total_s"] = 0.0
         breakdown["parse_second_skipped_reused_blocks"] = 1.0
@@ -277,7 +289,13 @@ def prepare_document_chunk_jobs(
         job_id,
     )
 
-    manifest = dump_manifest_v2(segments=segments, batches=batches, block_work=block_work)
+    manifest = dump_manifest_v2(
+        segments=segments,
+        batches=batches,
+        block_work=block_work,
+        document_template_id=document_template_id,
+        translation_target=tt,
+    )
     manifest_path.write_bytes(manifest_json_bytes(manifest))
 
     if not batches:
@@ -301,7 +319,11 @@ def prepare_document_chunk_jobs(
     cap = int(getattr(settings, "inline_translation_max_batches", 0) or 0)
     if cap > 0 and len(batches) <= cap:
         breakdown["inline_translate_sequential_s"] = _inline_translate_batches(
-            job_id, job_dir, segments, batches
+            job_id,
+            job_dir,
+            segments,
+            batches,
+            translation_target=tt,
         )
         logger.info(
             "chunk_prepare stage=inline_done total_wall_s=%.3f job=%s",

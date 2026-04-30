@@ -14,7 +14,11 @@ import httpx
 from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
 
 from app.core.pipeline_settings import get_pipeline_settings
-from app.services.translator.hinglish_translator import PROMPT_TEMPLATE
+from app.services.translator.hinglish_translator import (
+    HINDI_PROMPT_TEMPLATE,
+    PROMPT_TEMPLATE,
+)
+from app.services.translation_target import HINDI, normalize_translation_target
 from app.services.translator.openai_errors import openai_user_facing_message
 from app.services.translator.openai_payload import (
     batch_segments_json_schema_response_format,
@@ -95,19 +99,56 @@ def _completion_budget_single(chunk: str) -> int:
     return min(_MAX_COMPLETION_TOKENS, max(384, int(inn * 2.5) + 400))
 
 
-MULTI_SEGMENT_RULES_PREFIX = """You will translate multiple labeled segments from English into Hinglish.
+MULTI_SEGMENT_RULES_PREFIX = """You will translate multiple labeled segments from English into Hinglish using the same rules as single-segment translation.
 
-Apply the SAME style and rules as for a single translation (natural Hinglish, Roman script only, full coverage, no summarizing).
+Key style rule: easy, conversational, English-heavy Roman-script Hinglish. Avoid “pure/shuddh/tatsam” Hindi words written in Roman (exam-book / news-anchor vibe). If an easy English word is more natural for a Hindi reader, use the English word.
 
-OUTPUT FORMAT (CRITICAL):
-Return ONLY one JSON object (not an array). Use ONLY string keys "0" through "{last_idx}" — one key per segment, no gaps.
-Each value MUST be a single JSON string: the Hinglish translation for that segment only (escape quotes and newlines inside the string per JSON rules).
-No markdown fences. No commentary. No other top-level keys (no "translations", "segments", "metadata", etc.).
+STRICT blacklist (do not use these words/phrases in output): tatha, evam, athva, kintu, punah/punah, prastut, pratyek, avashyak, anivarya, nirdesh, nirdharit, upyukt, uchit, upalabdh, spashtikaran, sambandhit, sambhavit, prapt, vishesh, samanya, upyog, upay, prabhav, prabhavit, pratisthit, tathy(a); also avoid Sanskritized textbook words like manushya, vicharon, sadaiv, vipreet, vastav, udaharan, vartaman.
 
-Example for three segments: {"0":"...","1":"...","2":"..."}
+Preferred easy replacements (pick what fits): lekin/but, ya/or, aur/and, phir/again, har/each, zaroori/needed, rule/required, bataya/guideline, set/fixed, sahi/right, milta/available, explain/clear karna, related, possible, mila/got, special, normal, use, solution, effect/impact, established/set, fact/real/sach/haqiqat.
+
+Also prefer common Hindustani/Urdu everyday words (when natural) over Sanskritized ones: lekin, kyunki, shayad, bilkul, sach, haqiqat, fayda, nuksan, mushkil, aasaan, zaroori.
+
+Prefer these when they fit: insaan / people, soch / thoughts / idea, hamesha, ulta / opposite, haqiqat / reality / actually, example / jaise, abhi / aaj kal / present.
+
+Other rules: full coverage, no summarizing, no omissions.
+
+Return one JSON object (not an array) with string keys "0" through "{last_idx}" only—one per segment, no gaps. Each value is one JSON string: the plain translation for that segment (escape quotes and newlines per JSON). Each string must be plain text only—no Markdown, HTML, or styling markup.
+Output that object directly with no extra keys, no wrapper objects, and no text before or after the JSON.
+
+Example: {"0":"...","1":"...","2":"..."}
 """
 
-SINGLE_SEGMENT_FALLBACK = PROMPT_TEMPLATE  # uses {chunk}
+MULTI_SEGMENT_RULES_HINDI_PREFIX = """You will translate multiple labeled segments from English into simple conversational Hindi in Devanagari using the same rules as single-segment translation (everyday words, not heavy Sanskrit; full coverage, no summarizing).
+
+Return one JSON object (not an array) with string keys "0" through "{last_idx}" only—one per segment, no gaps. Each value is one JSON string: the plain translation for that segment in Devanagari (escape quotes and newlines per JSON). Each string must be plain text only—no Markdown, HTML, or styling markup.
+Output that object directly with no extra keys, no wrapper objects, and no text before or after the JSON.
+
+Example: {"0":"...","1":"...","2":"..."}
+"""
+
+
+def _multi_segment_rules_prefix_for_target(translation_target: str) -> str:
+    return (
+        MULTI_SEGMENT_RULES_HINDI_PREFIX
+        if normalize_translation_target(translation_target) == HINDI
+        else MULTI_SEGMENT_RULES_PREFIX
+    )
+
+
+def _single_segment_prompt_template(translation_target: str) -> str:
+    return (
+        HINDI_PROMPT_TEMPLATE
+        if normalize_translation_target(translation_target) == HINDI
+        else PROMPT_TEMPLATE
+    )
+
+
+def _openai_http_status_is_transient_server_error(status_code: int | None) -> bool:
+    """HTTP 5xx from the API gateway / upstream — safe to retry with backoff."""
+    if status_code is None:
+        return False
+    return 500 <= status_code <= 599
 
 
 def _openai_retry_sleep_seconds(exc: Exception, attempt: int) -> float:
@@ -130,6 +171,7 @@ async def _translate_segments_parallel_limited(
     on_tokens: Callable[[int], None] | None,
     max_parallel: int,
     inflight: asyncio.Semaphore,
+    translation_target: str,
 ) -> list[str]:
     """Run single-segment calls with a hard cap — unbounded gather exhausts TPM (429)."""
     cap = max(1, min(max_parallel, len(segments)))
@@ -138,7 +180,12 @@ async def _translate_segments_parallel_limited(
     async def one(seg: str) -> str:
         async with local:
             return await _async_translate_one(
-                client, model, seg, on_tokens=on_tokens, inflight=inflight
+                client,
+                model,
+                seg,
+                on_tokens=on_tokens,
+                inflight=inflight,
+                translation_target=translation_target,
             )
 
     return await asyncio.gather(*[one(s) for s in segments])
@@ -150,9 +197,11 @@ def _fallback_single_segment_parallelism() -> int:
     return max(1, min(4, max(1, settings.translate_batch_max_concurrency // 2)))
 
 
-def _prompt_for_segments(segments: list[str]) -> str:
+def _prompt_for_segments(segments: list[str], *, translation_target: str) -> str:
     last_idx = max(0, len(segments) - 1)
-    rules = MULTI_SEGMENT_RULES_PREFIX.replace("{last_idx}", str(last_idx))
+    rules = _multi_segment_rules_prefix_for_target(translation_target).replace(
+        "{last_idx}", str(last_idx)
+    )
     parts = [rules, "\n\nSEGMENTS:\n"]
     for i, seg in enumerate(segments):
         parts.append(f'\n---SEGMENT_{i}---\n"""\n')
@@ -416,6 +465,7 @@ async def _async_translate_one(
     *,
     on_tokens: Callable[[int], None] | None = None,
     inflight: asyncio.Semaphore,
+    translation_target: str,
 ) -> str:
     """Single-segment completion (same prompt as legacy ``translate_chunk``)."""
     if not chunk.strip():
@@ -423,13 +473,17 @@ async def _async_translate_one(
     settings = get_pipeline_settings()
     safe_chunk = sanitize_user_text(chunk)
     temp = finite_temperature(float(settings.translation_temperature))
+    tgt = normalize_translation_target(translation_target)
     if settings.translation_cache_enabled and settings.redis_url:
 
         def _cache_get() -> str | None:
             from app.services.translation_cache import lookup_cached_translations
 
             row = lookup_cached_translations(
-                [safe_chunk], model=model, temperature=temp
+                [safe_chunk],
+                model=model,
+                temperature=temp,
+                translation_target=tgt,
             )
             return row[0] if row else None
 
@@ -437,7 +491,8 @@ async def _async_translate_one(
         if hit is not None:
             return hit
 
-    prompt = SINGLE_SEGMENT_FALLBACK.format(chunk=safe_chunk)
+    # Use replace, not str.format — source text may contain `{...}` (JSON, placeholders).
+    prompt = _single_segment_prompt_template(tgt).replace("{chunk}", safe_chunk)
     max_retries = settings.gpt_max_retries
     last_err: Exception | None = None
     for attempt in range(max_retries):
@@ -463,8 +518,18 @@ async def _async_translate_one(
             continue
         except APIError as e:
             last_err = e
-            if getattr(e, "status_code", None) == 429:
+            sc = getattr(e, "status_code", None)
+            if sc == 429 or _openai_http_status_is_transient_server_error(sc):
                 wait = _openai_retry_sleep_seconds(e, attempt)
+                kind = "429" if sc == 429 else f"HTTP {sc}"
+                logger.warning(
+                    "OpenAI single-segment retry (%s, attempt %s/%s): %s; sleeping %.1fs",
+                    kind,
+                    attempt + 1,
+                    max_retries,
+                    e,
+                    wait,
+                )
                 await asyncio.sleep(wait)
                 continue
             raise RuntimeError(openai_user_facing_message(e)) from e
@@ -483,7 +548,11 @@ async def _async_translate_one(
                 from app.services.translation_cache import store_cached_translations
 
                 store_cached_translations(
-                    [safe_chunk], [content], model=model, temperature=temp
+                    [safe_chunk],
+                    [content],
+                    model=model,
+                    temperature=temp,
+                    translation_target=tgt,
                 )
 
             await asyncio.to_thread(_cache_put)
@@ -504,16 +573,23 @@ async def _openai_translate_multi_segment(
     *,
     on_tokens: Callable[[int], None] | None = None,
     inflight: asyncio.Semaphore,
+    translation_target: str,
 ) -> list[str]:
     """Multi-segment OpenAI completion only (no Redis translation cache)."""
+    tgt = normalize_translation_target(translation_target)
     if len(segments) == 1:
         return [
             await _async_translate_one(
-                client, model, segments[0], on_tokens=on_tokens, inflight=inflight
+                client,
+                model,
+                segments[0],
+                on_tokens=on_tokens,
+                inflight=inflight,
+                translation_target=tgt,
             )
         ]
 
-    prompt = _prompt_for_segments(segments)
+    prompt = _prompt_for_segments(segments, translation_target=tgt)
     settings = get_pipeline_settings()
     max_retries = settings.gpt_max_retries
     last_err: Exception | None = None
@@ -573,9 +649,18 @@ async def _openai_translate_multi_segment(
         except APIError as e:
             last_err = e
             sc = getattr(e, "status_code", None)
-            if sc == 429:
+            if sc == 429 or _openai_http_status_is_transient_server_error(sc):
                 api_failures += 1
                 wait = _openai_retry_sleep_seconds(e, api_failures - 1)
+                kind = "429" if sc == 429 else f"HTTP {sc}"
+                logger.warning(
+                    "OpenAI batch transient (%s, attempt %s/%s): %s; sleeping %.1fs",
+                    kind,
+                    api_failures,
+                    max_retries,
+                    e,
+                    wait,
+                )
                 await asyncio.sleep(wait)
                 continue
             if sc == 400 and rf_idx + 1 < len(batch_rf_formats):
@@ -635,6 +720,7 @@ async def _openai_translate_multi_segment(
         on_tokens=on_tokens,
         max_parallel=fb_parallel,
         inflight=inflight,
+        translation_target=tgt,
     )
 
 
@@ -645,11 +731,18 @@ async def _async_translate_multi(
     *,
     on_tokens: Callable[[int], None] | None = None,
     inflight: asyncio.Semaphore,
+    translation_target: str,
 ) -> list[str]:
+    tgt = normalize_translation_target(translation_target)
     if len(segments) == 1:
         return [
             await _async_translate_one(
-                client, model, segments[0], on_tokens=on_tokens, inflight=inflight
+                client,
+                model,
+                segments[0],
+                on_tokens=on_tokens,
+                inflight=inflight,
+                translation_target=tgt,
             )
         ]
 
@@ -664,7 +757,9 @@ async def _async_translate_multi(
         def _lookup() -> list[str | None]:
             from app.services.translation_cache import lookup_cached_translations
 
-            return lookup_cached_translations(segments, model=model, temperature=temp)
+            return lookup_cached_translations(
+                segments, model=model, temperature=temp, translation_target=tgt
+            )
 
         cached_row = await asyncio.to_thread(_lookup)
     else:
@@ -688,6 +783,7 @@ async def _async_translate_multi(
         work_segs,
         on_tokens=on_tokens,
         inflight=inflight,
+        translation_target=tgt,
     )
     if len(out_work) != len(miss_idx):
         raise RuntimeError(
@@ -702,7 +798,11 @@ async def _async_translate_multi(
             from app.services.translation_cache import store_cached_translations
 
             store_cached_translations(
-                work_segs, out_work, model=model, temperature=temp
+                work_segs,
+                out_work,
+                model=model,
+                temperature=temp,
+                translation_target=tgt,
             )
 
         await asyncio.to_thread(_store)
@@ -774,6 +874,7 @@ async def translate_segments_batched_async(
     on_batch_done: Callable[[int, int], None] | None = None,
     on_batch_timing: Callable[[int, int, float], None] | None = None,
     on_translation_pulse: Callable[[float], None] | None = None,
+    translation_target: str = "hinglish",
 ) -> list[str]:
     """Translate all segments; results align 1:1 with ``segment_texts``."""
     settings = get_pipeline_settings()
@@ -826,7 +927,12 @@ async def translate_segments_batched_async(
         async with sem:
             t0 = time.perf_counter()
             out = await _async_translate_multi(
-                client, model, segs, on_tokens=on_tokens, inflight=inflight
+                client,
+                model,
+                segs,
+                on_tokens=on_tokens,
+                inflight=inflight,
+                translation_target=translation_target,
             )
             dt = time.perf_counter() - t0
             logger.info(
@@ -894,6 +1000,7 @@ def translate_segments_batched_sync(
     on_batch_done: Callable[[int, int], None] | None = None,
     on_batch_timing: Callable[[int, int, float], None] | None = None,
     on_translation_pulse: Callable[[float], None] | None = None,
+    translation_target: str = "hinglish",
 ) -> list[str]:
     return asyncio.run(
         translate_segments_batched_async(
@@ -902,6 +1009,7 @@ def translate_segments_batched_sync(
             on_batch_done=on_batch_done,
             on_batch_timing=on_batch_timing,
             on_translation_pulse=on_translation_pulse,
+            translation_target=translation_target,
         )
     )
 
@@ -912,6 +1020,7 @@ async def translate_one_chunk_batch_async(
     on_tokens: Callable[[int], None] | None = None,
     openai_client: AsyncOpenAI | None = None,
     on_translation_pulse: Callable[[float], None] | None = None,
+    translation_target: str = "hinglish",
 ) -> tuple[list[str], float]:
     """One chunk-queue job: translate ``segments`` (subset of document) with minimal round-trips.
 
@@ -945,7 +1054,12 @@ async def translate_one_chunk_batch_async(
         pulse_task = asyncio.create_task(_pulse_loop())
     try:
         out = await _async_translate_multi(
-            client, model, segments, on_tokens=on_tokens, inflight=inflight
+            client,
+            model,
+            segments,
+            on_tokens=on_tokens,
+            inflight=inflight,
+            translation_target=translation_target,
         )
         return out, time.perf_counter() - t0
     finally:
@@ -963,7 +1077,10 @@ def translate_one_chunk_batch_sync(
     segments: list[str],
     *,
     on_tokens: Callable[[int], None] | None = None,
+    translation_target: str = "hinglish",
 ) -> tuple[list[str], float]:
     return asyncio.run(
-        translate_one_chunk_batch_async(segments, on_tokens=on_tokens)
+        translate_one_chunk_batch_async(
+            segments, on_tokens=on_tokens, translation_target=translation_target
+        )
     )

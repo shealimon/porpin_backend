@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-# Product currently translates to Hinglish only; keep a single label for filenames.
 OUTPUT_LANGUAGE_HINGLISH = "Hinglish"
+OUTPUT_LANGUAGE_HINDI = "Hindi"
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _MAX_STEM_LEN = 180
@@ -34,3 +34,13 @@ def translation_output_filename(
     ext = extension.lstrip(".").lower()
     base = safe_upload_stem(input_filename)
     return f"{base}-{output_language}.{ext}"
+
+
+def translation_structure_output_filename(
+    input_filename: str,
+    *,
+    output_language: str = OUTPUT_LANGUAGE_HINGLISH,
+) -> str:
+    """Sidecar JSON: ``Sleep_Book.pdf`` → ``Sleep_Book-Hinglish.structure.json``."""
+    base = safe_upload_stem(input_filename)
+    return f"{base}-{output_language}.structure.json"

@@ -23,6 +23,10 @@ from app.services.formatter.book_typography import (
     LIBRE_BASKERVILLE,
     strip_markdown_artifacts,
 )
+from app.services.formatter.chapter_heading_policy import (
+    is_chapter_outline_level,
+    chapter_start_level,
+)
 from app.services.formatter.docx_embed_fonts import embed_libre_baskerville
 
 STYLE_BOOK_TITLE = "Translator Book Title"
@@ -73,10 +77,10 @@ def _set_run_fonts(run, *, bold: bool) -> None:
 
 def _apply_body_paragraph(p, text: str) -> None:
     p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-    p.paragraph_format.line_spacing = 1.5
+    p.paragraph_format.line_spacing = 1.55
     p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
     p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(8)
+    p.paragraph_format.space_after = Pt(10)
     _add_multiline_run(p, text, bold=False, size_pt=12)
 
 
@@ -86,16 +90,16 @@ def _apply_main_heading_paragraph(p, text: str, *, page_break_before: bool) -> N
     p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
     p.paragraph_format.line_spacing = 1.2
     p.paragraph_format.space_before = Pt(36)
-    # Extra gap after title: default trailing space plus one line at 18pt × 1.2 line spacing.
-    p.paragraph_format.space_after = Pt(24 + 22)
+    # One body line of vertical gap before left-aligned content (12pt × 1.5 line spacing).
+    p.paragraph_format.space_after = Pt(18)
     _add_multiline_run(p, text, bold=True, size_pt=18)
 
 
 def _apply_list_paragraph(p, text: str) -> None:
     p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-    p.paragraph_format.line_spacing = 1.5
+    p.paragraph_format.line_spacing = 1.55
     p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    p.paragraph_format.space_after = Pt(6)
+    p.paragraph_format.space_after = Pt(8)
     _add_multiline_run(p, text, bold=False, size_pt=12)
 
 
@@ -147,9 +151,9 @@ def _configure_document_defaults(doc: Document) -> None:
     normal.font.name = LIBRE_BASKERVILLE
     normal.font.size = Pt(12)
     normal.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-    normal.paragraph_format.line_spacing = 1.5
+    normal.paragraph_format.line_spacing = 1.55
     normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    normal.paragraph_format.space_after = Pt(8)
+    normal.paragraph_format.space_after = Pt(10)
     nr = normal.element.get_or_add_rPr()
     nf = nr.get_or_add_rFonts()
     nf.set(qn("w:ascii"), LIBRE_BASKERVILLE)
@@ -366,7 +370,11 @@ def _add_toc_section(doc: Document, toc_items: list[ClassifiedBlock]) -> None:
 
 
 def _append_body_block(
-    doc: Document, item: ClassifiedBlock, *, first_main_heading: list[bool]
+    doc: Document,
+    item: ClassifiedBlock,
+    *,
+    body_started: list[bool],
+    chapter_min_level: int | None,
 ) -> None:
     b = item.block
     raw = b.text or ""
@@ -374,10 +382,9 @@ def _append_body_block(
 
     if b.type == BlockType.HEADING:
         level = max(1, min(9, b.level))
-        if level == 1:
+        if is_chapter_outline_level(level, chapter_min_level):
             p = doc.add_paragraph(style="Heading 1")
-            brk = not first_main_heading[0]
-            first_main_heading[0] = False
+            brk = body_started[0]
             _apply_main_heading_paragraph(p, text, page_break_before=brk)
         else:
             p = doc.add_paragraph(style=f"Heading {level}")
@@ -401,6 +408,8 @@ def _append_body_block(
                     _style_table_cell(cell, cell_text)
             doc.add_paragraph()
 
+    body_started[0] = True
+
 
 def build_docx(blocks: list[ClassifiedBlock], output_path: Path) -> Path:
     doc = Document()
@@ -418,11 +427,25 @@ def build_docx(blocks: list[ClassifiedBlock], output_path: Path) -> Path:
     if toc_items:
         _add_toc_section(doc, toc_items)
 
-    first_flag = [True]
+    ol_lvls: list[int] = []
     for item in body_items:
         if item.action == SectionAction.OMIT:
             continue
-        _append_body_block(doc, item, first_main_heading=first_flag)
+        b = item.block
+        if b.type == BlockType.HEADING:
+            ol_lvls.append(max(1, min(9, b.level)))
+    chapter_min = chapter_start_level(ol_lvls)
+
+    body_started = [False]
+    for item in body_items:
+        if item.action == SectionAction.OMIT:
+            continue
+        _append_body_block(
+            doc,
+            item,
+            body_started=body_started,
+            chapter_min_level=chapter_min,
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))

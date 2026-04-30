@@ -31,11 +31,16 @@ from app.deps.supabase_auth import resolve_auth_profile_with_anonymous_fallback
 from app.limiter import limiter, user_or_ip_key
 from app.observability.pipeline_performance import PipelinePerfReport
 from app.services.async_job import create_and_enqueue_job_from_bytes
-from app.services.pipeline_runner import run_pipeline, try_convert_docx_to_pdf
+from app.services.pipeline_runner import run_pipeline
+from app.services.translation_pdf_export import export_translation_pdf
+from app.services.structured_document_builder import structured_json_path_for_docx
 from app.services.storage.local_storage import save_temp_file
 from app.utils.cleanup import safe_delete_many
 from app.utils.file_validation import assert_allowed_filename, validate_file_bytes
-from app.utils.translation_output_filenames import translation_output_filename
+from app.utils.translation_output_filenames import (
+    translation_output_filename,
+    translation_structure_output_filename,
+)
 from app.utils.zip_export import write_translation_zip
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,7 @@ def _enqueue_translate_job_sync2(
     export: ExportFormat,
     deferred_payment: bool,
     payg_quote_inr: float | None,
+    translation_target: str,
 ) -> tuple[uuid.UUID, str]:
     """Auth + disk/DB enqueue in one thread so the event loop stays responsive under load."""
     profile = resolve_auth_profile_with_anonymous_fallback(authorization, x_api_key)
@@ -70,6 +76,7 @@ def _enqueue_translate_job_sync2(
         export,
         deferred_payment=deferred_payment,
         payg_quote_inr=payg_quote_inr,
+        translation_target=translation_target,
     )
     st = "awaiting_payment" if deferred_payment else "pending"
     return jid, st
@@ -105,6 +112,10 @@ async def translate_document(
         default=None,
         description="Required when deferred_payment: estimated pay-as-you-go INR for the document (server matches Razorpay order amount).",
     ),
+    translation_target: str = Form(
+        default="hinglish",
+        description="hinglish (Roman) or hindi (Devanagari).",
+    ),
     user: User | None = Depends(optional_user_only_when_sync_translate),
 ):
     settings = get_pipeline_settings()
@@ -130,6 +141,7 @@ async def translate_document(
         export,
         deferred_payment,
         payg_quote_inr,
+        translation_target,
     )
     # Mark response so clients do not treat JSON as DOCX/PDF binary (sync disabled by default).
     return JSONResponse(
@@ -171,6 +183,7 @@ async def _translate_sync(
     try:
         docx_out = run_pipeline(input_path, perf_report=perf)
         paths_to_clean.append(docx_out)
+        paths_to_clean.append(structured_json_path_for_docx(docx_out))
     except ValueError as e:
         logger.warning("Parse / structure error: %s", e)
         safe_delete_many(paths_to_clean)
@@ -201,9 +214,15 @@ async def _translate_sync(
     )
     download_name = translation_output_filename(upload_name, "docx")
 
+    struct_path = structured_json_path_for_docx(docx_out)
+
     if export == ExportFormat.PDF:
         try:
-            pdf_path = try_convert_docx_to_pdf(docx_out)
+            pdf_path = await asyncio.to_thread(
+                export_translation_pdf,
+                docx_out,
+                struct_path,
+            )
             paths_to_clean.append(pdf_path)
             response_path = pdf_path
             media_type = "application/pdf"
@@ -215,7 +234,11 @@ async def _translate_sync(
             raise HTTPException(status_code=501, detail=str(e)) from e
     elif export == ExportFormat.BOTH:
         try:
-            pdf_path = try_convert_docx_to_pdf(docx_out)
+            pdf_path = await asyncio.to_thread(
+                export_translation_pdf,
+                docx_out,
+                struct_path,
+            )
             paths_to_clean.append(pdf_path)
         except RuntimeError as e:
             safe_delete_many(paths_to_clean)
@@ -230,6 +253,7 @@ async def _translate_sync(
             {
                 docx_member: docx_out,
                 pdf_member: pdf_path,
+                translation_structure_output_filename(upload_name): struct_path,
             },
             zip_path,
         )

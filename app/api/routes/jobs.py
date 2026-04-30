@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from app.api.schemas.export_format import ExportFormat
@@ -56,6 +56,7 @@ async def create_translation_job(
     request: Request,
     file: UploadFile = File(...),
     export: ExportFormat = ExportFormat.DOCX,
+    translation_target: str = Form(default="hinglish"),
     profile: AuthProfile = Depends(require_auth_profile_flexible),
 ):
     data = await file.read()
@@ -65,6 +66,9 @@ async def create_translation_job(
         file.filename or "upload",
         data,
         export,
+        deferred_payment=False,
+        payg_quote_inr=None,
+        translation_target=translation_target,
     )
     return JobCreatedResponse(job_id=str(job_id), status=JobStatus.PENDING.value)
 

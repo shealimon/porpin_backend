@@ -1,0 +1,56 @@
+<header class="doc-landmark">
+  <h1 class="doc-title{% if title == 'Document' %} doc-title--default{% endif %}">{{ title }}</h1>
+</header>
+{% if toc is defined and toc %}
+<nav class="doc-toc" aria-label="Table of contents">
+  <h2 class="doc-heading doc-heading--2 doc-toc-title">Contents</h2>
+  <ul class="doc-toc-list">
+  {% for it in toc %}
+    <li class="doc-toc-item doc-toc-item--lvl-{{ it.level }}">
+      <a class="doc-toc-link" href="#{{ it.anchor }}">{{ it.text }}</a>
+    </li>
+  {% endfor %}
+  </ul>
+</nav>
+{% endif %}
+{% if use_chapters %}
+{% for ch in chapters %}
+<section class="doc-chapter">
+  {% if ch.title %}
+  <div class="doc-chapter-opener">
+    <div class="doc-chapter-number">{{ ch.chapterNo if ch.chapterNo else loop.index }}</div>
+    <div class="doc-chapter-ornament" aria-hidden="true"></div>
+    <h2 class="doc-chapter-title doc-heading doc-heading--2">{{ ch.displayTitle if ch.displayTitle else ch.title }}</h2>
+  </div>
+  {% endif %}
+  {% for h in ch.headings %}
+  <h{{ h.hLevel }}{% if h.anchor %} id="{{ h.anchor }}"{% endif %} class="doc-heading doc-heading--{{ h.hLevel }}">{{ h.text }}</h{{ h.hLevel }}>
+  {% endfor %}
+  {% for p in ch.paragraphs %}
+  <p class="doc-paragraph">{{ p }}</p>
+  {% endfor %}
+  {% for lst in ch.lists %}
+  {% if lst.ordered %}
+  <ol class="doc-list doc-list--ordered">{% for it in lst['items'] %}<li class="doc-list-item">{{ it }}</li>{% endfor %}</ol>
+  {% else %}
+  <ul class="doc-list">{% for it in lst['items'] %}<li class="doc-list-item">{{ it }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% endfor %}
+</section>
+{% endfor %}
+{% else %}
+{% from "_macros.j2" import render_block %}
+{% set ns = namespace(chapter_no=0) %}
+{% for block in blocks %}
+{% if block.type == "heading" and block.chapterStart %}
+{% set ns.chapter_no = ns.chapter_no + 1 %}
+<div class="doc-chapter-page doc-chapter-opener">
+  <div class="doc-chapter-number">{{ block.chapterNo if block.chapterNo else ns.chapter_no }}</div>
+  <div class="doc-chapter-ornament" aria-hidden="true"></div>
+  <h{{ block.hLevel }}{% if block.anchor %} id="{{ block.anchor }}"{% endif %} class="doc-chapter-title doc-heading doc-heading--{{ block.hLevel }}">{{ block.displayText if block.displayText else block.text }}</h{{ block.hLevel }}>
+</div>
+{% else %}
+{{ render_block(block) }}
+{% endif %}
+{% endfor %}
+{% endif %}

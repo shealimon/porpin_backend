@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CACHE_KEY_PREFIX = "translator:tx:v1"
+_CACHE_KEY_PREFIX = "translator:tx:v2"
 
 
 def _redis_available() -> bool:
@@ -21,9 +21,13 @@ def _redis_available() -> bool:
     return bool(s.redis_url and s.translation_cache_enabled)
 
 
-def _cache_key(model: str, temperature: float, text: str) -> str:
+def _cache_key(
+    model: str, temperature: float, text: str, translation_target: str
+) -> str:
     h = hashlib.sha256(
-        f"{model}\x1f{temperature:.6f}\x1f{text}".encode("utf-8", errors="surrogatepass")
+        f"{model}\x1f{temperature:.6f}\x1f{translation_target}\x1f{text}".encode(
+            "utf-8", errors="surrogatepass"
+        )
     ).hexdigest()
     return f"{_CACHE_KEY_PREFIX}:{h}"
 
@@ -39,6 +43,7 @@ def lookup_cached_translations(
     *,
     model: str,
     temperature: float,
+    translation_target: str = "hinglish",
 ) -> list[str | None]:
     """
     Return a list parallel to ``segments`` with cached Hinglish or None on miss.
@@ -54,7 +59,7 @@ def lookup_cached_translations(
         if not (seg and seg.strip()):
             continue
         indices.append(i)
-        keys.append(_cache_key(model, temperature, seg))
+        keys.append(_cache_key(model, temperature, seg, translation_target))
 
     if not keys:
         return [None] * len(segments)
@@ -83,6 +88,7 @@ def store_cached_translations(
     *,
     model: str,
     temperature: float,
+    translation_target: str = "hinglish",
 ) -> None:
     if not segments or not _redis_available():
         return
@@ -104,7 +110,9 @@ def store_cached_translations(
                 continue
             if tx == seg:
                 continue
-            pipe.set(_cache_key(model, temperature, seg), tx, ex=ttl)
+            pipe.set(
+                _cache_key(model, temperature, seg, translation_target), tx, ex=ttl
+            )
             n += 1
         if n:
             pipe.execute()

@@ -1,0 +1,91 @@
+/* Academic: serif body, formal spacing, justified text */
+.doc-root.doc-theme--academic {
+  --doc-fg: #1a1a1a;
+  --doc-bg: #ffffff;
+  --doc-border: #d4d4d4;
+  --doc-max: 44rem;
+  --doc-outer: clamp(1.75rem, 5vw, 3rem);
+  --doc-serif: "Georgia", "Times New Roman", "Times", serif;
+  margin: 0;
+  min-height: 100vh;
+  background: var(--doc-bg);
+  color: var(--doc-fg);
+  font-family: var(--doc-serif);
+  font-size: 12pt;
+  line-height: 1.85;
+  -webkit-font-smoothing: antialiased;
+}
+
+.doc-root.doc-theme--academic .doc-article {
+  max-width: var(--doc-max);
+  margin: 0 auto;
+  padding: var(--doc-outer);
+  box-sizing: border-box;
+}
+
+.doc-root.doc-theme--academic .doc-landmark {
+  text-align: center;
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--doc-border);
+}
+
+.doc-root.doc-theme--academic .doc-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin: 0;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.doc-root.doc-theme--academic .doc-heading--2 {
+  font-size: 1.08rem;
+  font-weight: 700;
+  margin: 1.75rem 0 0.55rem;
+  text-align: left;
+}
+
+.doc-root.doc-theme--academic .doc-heading--3 {
+  font-size: 1.02rem;
+  font-weight: 700;
+  font-style: italic;
+  margin: 1.35rem 0 0.45rem;
+}
+
+.doc-root.doc-theme--academic .doc-heading--4 {
+  font-size: 0.98rem;
+  font-weight: 700;
+  margin: 1.15rem 0 0.35rem;
+}
+
+.doc-root.doc-theme--academic .doc-heading--5 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 1rem 0 0.3rem;
+}
+
+.doc-root.doc-theme--academic .doc-heading--6 {
+  font-size: 0.92rem;
+  font-weight: 700;
+  margin: 0.9rem 0 0.25rem;
+}
+
+.doc-root.doc-theme--academic .doc-paragraph {
+  margin: 0 0 1em;
+  text-align: justify;
+  hyphens: auto;
+}
+
+.doc-root.doc-theme--academic .doc-list {
+  margin: 0.5rem 0 1.25rem 1.35rem;
+  padding: 0;
+}
+
+.doc-root.doc-theme--academic .doc-list-item {
+  margin-bottom: 0.4em;
+  text-align: left;
+}
+
+.doc-root.doc-theme--academic .doc-list-item::marker {
+  color: #525252;
+}

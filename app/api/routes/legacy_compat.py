@@ -36,7 +36,14 @@ from app.db.session import get_session_factory
 from app.deps.supabase_auth import AuthProfile, resolve_auth_profile_with_anonymous_fallback
 from app.services.parser import parse_document
 from app.jobs.job_progress import publish_translation_progress, read_translation_progress
-from app.services.pipeline_runner import run_pipeline, try_convert_docx_to_pdf
+from app.services.pipeline_runner import run_pipeline
+from app.services.structured_document_builder import structured_json_path_for_docx
+from app.services.translation_pdf_export import export_translation_pdf
+from app.services.translation_target import (
+    download_stem_label,
+    normalize_translation_target,
+    translation_target_label,
+)
 from app.utils.translation_output_filenames import translation_output_filename
 from app.services.preview_slice import preview_eligibility, truncate_blocks_to_word_budget
 from app.payg_pricing import estimate_payg_inr
@@ -77,6 +84,7 @@ class _MilestoneState:
         "preview_eligible",
         "document_page_count",
         "preview_pages_cap",
+        "translation_target",
     )
 
     def __init__(
@@ -113,9 +121,10 @@ class _MilestoneState:
         self.preview_eligible: bool = False
         self.document_page_count: int = 1
         self.preview_pages_cap: int = 3
+        self.translation_target: str = "hinglish"
 
 
-_ALLOWED = frozenset({".pdf", ".docx", ".txt"})
+_ALLOWED = frozenset({".pdf", ".docx", ".txt", ".epub", ".ebup"})
 
 
 def _milestone_ui_status_to_db_job_status(milestone_status: str) -> str:
@@ -176,6 +185,7 @@ def _legacy_sync_milestone_to_db_on_commit(
         quote_inr = (
             round(cost, 2) if (st.status or "").lower() == "awaiting_payment" else 0.0
         )
+        tt = normalize_translation_target(getattr(st, "translation_target", None))
     try:
         with factory() as session:
             row = session.get(DocumentJob, jid)
@@ -192,6 +202,7 @@ def _legacy_sync_milestone_to_db_on_commit(
                         tokens_used=wc,
                         cost_inr=cost,
                         quoted_payg_inr=quote_inr,
+                        translation_target=tt,
                     )
                 )
             else:
@@ -202,6 +213,7 @@ def _legacy_sync_milestone_to_db_on_commit(
                 row.tokens_used = wc
                 row.cost_inr = cost
                 row.quoted_payg_inr = quote_inr
+                row.translation_target = tt
             session.commit()
         logger.info("Synced committed job %s to public.jobs", job_id)
     except IntegrityError:
@@ -262,6 +274,13 @@ def _legacy_update_job_row(
                         status,
                     )
                     return
+                tt_ins = "hinglish"
+                with _milestone_lock:
+                    st_m = _milestone_jobs.get(job_id_str)
+                    if st_m is not None:
+                        tt_ins = normalize_translation_target(
+                            getattr(st_m, "translation_target", None)
+                        )
                 row = DocumentJob(
                     id=jid,
                     user_id=uid,
@@ -272,6 +291,7 @@ def _legacy_update_job_row(
                     file_type=ft,
                     tokens_used=tok if tok is not None else 0,
                     cost_inr=cost if cost is not None else 0,
+                    translation_target=tt_ins,
                 )
                 session.add(row)
             row.status = status
@@ -324,6 +344,18 @@ def _estimate_word_count_fast(path: Path) -> int:
                     t = (cell.text or "").strip()
                     if t:
                         parts.append(t)
+        return len(re.findall(r"\S+", " ".join(parts)))
+    if suffix in {".epub", ".ebup"}:
+        from app.services.parser.epub_parser import parse_epub
+
+        blocks = parse_epub(path)
+        parts: list[str] = []
+        for b in blocks:
+            if b.text:
+                parts.append(b.text)
+            if b.data:
+                for row in b.data:
+                    parts.extend(cell for cell in row if cell)
         return len(re.findall(r"\S+", " ".join(parts)))
     raise ValueError(f"Unsupported type: {suffix}")
 
@@ -453,6 +485,7 @@ def _run_milestone_job(job_id: str) -> None:
         st.progress_percent = 10
         st.started_at = time.monotonic()
         path = st.input_path
+        tt = normalize_translation_target(getattr(st, "translation_target", None))
 
     _legacy_update_job_row(job_id, status=JobStatus.PROCESSING.value)
 
@@ -483,6 +516,7 @@ def _run_milestone_job(job_id: str) -> None:
             path,
             on_progress=report_progress,
             progress_job_id=job_id,
+            translation_target=tt,
         )
         publish_translation_progress(
             job_id,
@@ -495,10 +529,10 @@ def _run_milestone_job(job_id: str) -> None:
                 st.progress_percent = 97
         pdf: Path | None = None
         try:
-            pdf = try_convert_docx_to_pdf(docx)
+            pdf = export_translation_pdf(docx, structured_json_path_for_docx(docx))
         except Exception as e:
             logger.warning(
-                "DOCX→PDF failed for job %s: %s",
+                "PDF export failed for job %s: %s",
                 job_id,
                 e,
                 exc_info=logger.isEnabledFor(logging.DEBUG),
@@ -605,6 +639,7 @@ def _run_milestone_preview_job(job_id: str) -> None:
         st.completed_at = None
         path = st.input_path
         cap = max(1, int(st.preview_pages_cap))
+        tt = normalize_translation_target(getattr(st, "translation_target", None))
 
     _legacy_update_job_row(job_id, status=JobStatus.PROCESSING.value)
 
@@ -676,13 +711,14 @@ def _run_milestone_preview_job(job_id: str) -> None:
             blocks=preview_blocks,
             on_progress=report_progress,
             progress_job_id=job_id,
+            translation_target=tt,
         )
         pdf: Path | None = None
         try:
-            pdf = try_convert_docx_to_pdf(docx)
+            pdf = export_translation_pdf(docx, structured_json_path_for_docx(docx))
         except Exception as e:
             logger.warning(
-                "DOCX→PDF failed for preview job %s: %s",
+                "PDF export failed for preview job %s: %s",
                 job_id,
                 e,
                 exc_info=logger.isEnabledFor(logging.DEBUG),
@@ -735,6 +771,7 @@ class UploadEstimateResponse(BaseModel):
 class JobConfirmBody(BaseModel):
     job_id: str
     input_lang: str = "en"
+    translation_target: str | None = None
 
 
 class JobDetailDto(BaseModel):
@@ -766,6 +803,14 @@ class JobDetailDto(BaseModel):
     preview_eligible: bool | None = None
     document_page_count: int | None = None
     preview_pages_cap: int | None = None
+    translation_target: str | None = None
+    translation_target_label: str | None = None
+
+
+def _translation_target_from_confirm_body(body: JobConfirmBody) -> str:
+    if body.translation_target and str(body.translation_target).strip():
+        return normalize_translation_target(body.translation_target)
+    return normalize_translation_target("hinglish")
 
 
 @plain_router.post("/upload", response_model=UploadEstimateResponse)
@@ -778,7 +823,7 @@ async def legacy_upload(request: Request, file: UploadFile = File(...)):
     if suffix not in _ALLOWED:
         raise HTTPException(
             status_code=415,
-            detail="Only PDF, DOCX, and TXT are supported.",
+            detail="Only PDF, DOCX, EPUB, and TXT are supported.",
         )
     data = await file.read()
     if not data:
@@ -885,7 +930,7 @@ async def legacy_api_create_job(request: Request, file: UploadFile = File(...)):
     if suffix not in _ALLOWED:
         raise HTTPException(
             status_code=415,
-            detail="Only PDF, DOCX, and TXT are supported.",
+            detail="Only PDF, DOCX, EPUB, and TXT are supported.",
         )
     data = await file.read()
     if not data:
@@ -1089,6 +1134,8 @@ def _document_job_row_to_job_detail_dto(row: DocumentJob) -> JobDetailDto:
     batches_total: int | None = None
     segments_translated: int | None = None
     segments_total: int | None = None
+    tt = normalize_translation_target(getattr(row, "translation_target", None))
+    ttl = translation_target_label(tt)
 
     if st == JobStatus.COMPLETED.value:
         progress_percent = 100
@@ -1113,6 +1160,9 @@ def _document_job_row_to_job_detail_dto(row: DocumentJob) -> JobDetailDto:
             ) = _apply_redis_progress_fields(
                 rp, progress_percent=progress_percent, stage=stage
             )
+            rttl = rp.get("translation_target_label")
+            if rttl:
+                ttl = str(rttl)
     else:
         stage = "queued"
         progress_percent = 10
@@ -1130,10 +1180,9 @@ def _document_job_row_to_job_detail_dto(row: DocumentJob) -> JobDetailDto:
         and not pdf_ok
     ):
         pdf_hint = (
-            "PDF export failed after translation. Check server logs. If LibreOffice or "
-            "Word conversion is unavailable, ensure ReportLab is installed "
-            "(pip install reportlab) and a system font exists (e.g. Arial on Windows). "
-            "DOCX download still works."
+            "PDF export failed after translation (WeasyPrint from structured content, then "
+            "DOCX→PDF fallback). Check server logs: WeasyPrint needs Pango/Cairo/GTK on the host; "
+            "fallback needs LibreOffice, ReportLab, or Word. DOCX download still works."
         )
 
     dur: float | None = None
@@ -1174,6 +1223,8 @@ def _document_job_row_to_job_detail_dto(row: DocumentJob) -> JobDetailDto:
         preview_eligible=None,
         document_page_count=None,
         preview_pages_cap=None,
+        translation_target=tt,
+        translation_target_label=ttl,
     )
 
 
@@ -1301,12 +1352,14 @@ def legacy_list_jobs(
 def legacy_job_confirm(request: Request, body: JobConfirmBody):
     profile = _legacy_try_profile(request)
     jid = body.job_id
+    tgt = _translation_target_from_confirm_body(body)
     with _milestone_lock:
         st = _milestone_jobs.get(jid)
         if st is None:
             raise HTTPException(status_code=404, detail="Job not found.")
         if st.status not in ("estimated", "preview_ready"):
             raise HTTPException(status_code=409, detail="Job already started or completed.")
+        st.translation_target = tgt
         wc = max(0, int(st.word_count))
         if profile:
             st.persist_user_id = profile.id
@@ -1334,6 +1387,7 @@ def legacy_job_confirm(request: Request, body: JobConfirmBody):
             st2 = _milestone_jobs.get(jid)
             if st2 is None:
                 raise HTTPException(status_code=404, detail="Job not found.")
+            st2.translation_target = tgt
             st2.status = "awaiting_payment"
             st2.progress_percent = 0
         _legacy_sync_milestone_to_db_on_commit(jid, profile)
@@ -1352,6 +1406,7 @@ def legacy_job_confirm(request: Request, body: JobConfirmBody):
         st3 = _milestone_jobs.get(jid)
         if st3 is None:
             raise HTTPException(status_code=404, detail="Job not found.")
+        st3.translation_target = tgt
         st3.status = "queued"
         st3.progress_percent = 5
 
@@ -1375,6 +1430,7 @@ def legacy_preview_start(request: Request, body: JobConfirmBody):
             detail="Sign in to start a free preview.",
         )
     jid = body.job_id
+    tgt = _translation_target_from_confirm_body(body)
     with _milestone_lock:
         st = _milestone_jobs.get(jid)
         if st is None:
@@ -1393,6 +1449,7 @@ def legacy_preview_start(request: Request, body: JobConfirmBody):
                     f"{st.preview_pages_cap}). Use full translation instead."
                 ),
             )
+        st.translation_target = tgt
         st.persist_user_id = profile.id
 
     _consume_preview_quota(profile.id)
@@ -1454,10 +1511,9 @@ def legacy_job_status(request: Request, job_id: str):
             and not pdf_ok
         ):
             pdf_hint = (
-                "PDF export failed after translation. Check server logs. If LibreOffice or "
-                "Word conversion is unavailable, ensure ReportLab is installed "
-                "(pip install reportlab) and a system font exists (e.g. Arial on Windows). "
-                "DOCX download still works."
+                "PDF export failed after translation (WeasyPrint from structured content, then "
+                "DOCX→PDF fallback). Check server logs: WeasyPrint needs Pango/Cairo/GTK on the host; "
+                "fallback needs LibreOffice, ReportLab, or Word. DOCX download still works."
             )
 
         snap = st.billing_snapshot
@@ -1484,6 +1540,12 @@ def legacy_job_status(request: Request, job_id: str):
         upt = str(snap["user_plan_type"]) if snap else (
             str(bill_live["user_plan_type"]) if bill_live else None
         )
+        tt = normalize_translation_target(getattr(st, "translation_target", None))
+        ttl = translation_target_label(tt)
+        if st.status == "processing":
+            rp2 = read_translation_progress(job_id)
+            if rp2 and rp2.get("translation_target_label"):
+                ttl = str(rp2["translation_target_label"])
         return JobDetailDto(
             job_id=st.job_id,
             status=st.status,
@@ -1510,6 +1572,8 @@ def legacy_job_status(request: Request, job_id: str):
             preview_eligible=st.preview_eligible if st.status == "estimated" else None,
             document_page_count=st.document_page_count,
             preview_pages_cap=st.preview_pages_cap,
+            translation_target=tt,
+            translation_target_label=ttl,
         )
 
     factory = get_session_factory()
@@ -1541,7 +1605,10 @@ def _legacy_translated_download_filename(job_id: str, ext: str, fallback: Path) 
     with _milestone_lock:
         st = _milestone_jobs.get(job_id)
         if st is not None and (st.file_name or "").strip():
-            return translation_output_filename(st.file_name, ext)
+            ol = download_stem_label(getattr(st, "translation_target", None))
+            return translation_output_filename(
+                st.file_name, ext, output_language=ol
+            )
     factory = get_session_factory()
     if factory is not None:
         try:
@@ -1551,7 +1618,10 @@ def _legacy_translated_download_filename(job_id: str, ext: str, fallback: Path) 
         with factory() as session:
             row = session.get(DocumentJob, jid)
         if row is not None and (row.input_filename or "").strip():
-            return translation_output_filename(row.input_filename, ext)
+            ol = download_stem_label(getattr(row, "translation_target", None))
+            return translation_output_filename(
+                row.input_filename, ext, output_language=ol
+            )
     return fallback.name
 
 

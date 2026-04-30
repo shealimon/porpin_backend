@@ -250,6 +250,9 @@ class DocumentJob(Base):
     # PAYG deferred: client pays for this job before enqueue; `quoted_payg_inr` is the agreed order amount.
     quoted_payg_inr: Mapped[float] = mapped_column(Numeric(10, 2), default=0)
     translation_attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    translation_target: Mapped[str] = mapped_column(
+        String(16), default="hinglish", server_default="hinglish"
+    )
 
     profile: Mapped["Profile"] = relationship(
         "Profile",

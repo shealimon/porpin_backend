@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -118,10 +119,14 @@ def parse_pdf(
                 plumber_pdf.close()
     finally:
         doc.close()
-    merged = _merge_short_paragraphs(blocks)
+    # Run de-duplication before merging so page headers/footers are removed while
+    # still isolated lines; then merge and run one more pass for safety.
+    deduped_pre_merge = _dedupe_repeated_pdf_fragments(blocks, page_count=page_limit)
+    merged = _merge_short_paragraphs(deduped_pre_merge)
+    deduped = _dedupe_repeated_pdf_fragments(merged, page_count=page_limit)
     if timings is not None:
         timings["pdf_text_extract_and_structure_s"] = time.perf_counter() - t_extract0
-    return merged
+    return deduped
 
 
 def _estimate_body_fontsize(doc: fitz.Document) -> float:
@@ -166,8 +171,14 @@ def _flush_pdf_line_buffer(
             )
         )
     elif _looks_like_list(text):
+        ordered = bool(re.match(r"^\d+[\.)]\s+", text.lstrip()))
         out.append(
-            ContentBlock(type=BlockType.LIST, text=text, source_page=source_page)
+            ContentBlock(
+                type=BlockType.LIST,
+                text=text,
+                source_page=source_page,
+                list_kind="ordered" if ordered else "bullet",
+            )
         )
     else:
         out.append(
@@ -264,3 +275,107 @@ def _merge_short_paragraphs(blocks: list[ContentBlock], max_gap: int = 2) -> lis
             merged.append(b)
             i += 1
     return merged
+
+
+def _normalized_fragment_key(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\S+", text or ""))
+
+
+def _max_consecutive_page_run(pages: set[int]) -> int:
+    if not pages:
+        return 0
+    seq = sorted(pages)
+    best = 1
+    cur = 1
+    for i in range(1, len(seq)):
+        if seq[i] == seq[i - 1] + 1:
+            cur += 1
+            if cur > best:
+                best = cur
+        else:
+            cur = 1
+    return best
+
+
+def _looks_like_page_number_fragment(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Common page-mark patterns from PDF extraction: "12", "- 12 -", "page 12"
+    return bool(
+        re.match(r"^\W*\d{1,4}\W*$", t, flags=re.IGNORECASE)
+        or re.match(r"^page\s+\d{1,4}\W*$", t, flags=re.IGNORECASE)
+    )
+
+
+def _dedupe_repeated_pdf_fragments(
+    blocks: list[ContentBlock],
+    *,
+    page_count: int,
+) -> list[ContentBlock]:
+    """Drop obvious repeated header/footer-like fragments from PDF extraction.
+
+    Conservative rules:
+    - only short heading/paragraph/list blocks,
+    - repeated on many distinct pages,
+    - never touch tables,
+    - remove standalone page-number fragments.
+    """
+    if not blocks or page_count < 3:
+        return blocks
+
+    seen_pages: dict[str, set[int]] = {}
+    seen_count: dict[str, int] = {}
+    for b in blocks:
+        if b.type not in (BlockType.HEADING, BlockType.PARAGRAPH, BlockType.LIST):
+            continue
+        if not b.text or b.source_page is None:
+            continue
+        txt = b.text.strip()
+        if _looks_like_page_number_fragment(txt):
+            continue
+        wc = _word_count(txt)
+        if wc < 1 or wc > 14 or len(txt) > 120:
+            continue
+        key = _normalized_fragment_key(txt)
+        if not key:
+            continue
+        seen_pages.setdefault(key, set()).add(int(b.source_page))
+        seen_count[key] = seen_count.get(key, 0) + 1
+
+    min_pages = max(6, int(page_count * 0.20))
+    min_run_pages = 5
+    repeated_keys = {
+        key
+        for key, pages in seen_pages.items()
+        if (
+            (len(pages) >= min_pages and seen_count.get(key, 0) >= len(pages))
+            or _max_consecutive_page_run(pages) >= min_run_pages
+        )
+    }
+    if not repeated_keys:
+        # Still strip obvious page-number-only fragments.
+        return [
+            b
+            for b in blocks
+            if not (b.text and _looks_like_page_number_fragment(b.text))
+        ]
+
+    out: list[ContentBlock] = []
+    for b in blocks:
+        txt = (b.text or "").strip()
+        if txt and _looks_like_page_number_fragment(txt):
+            continue
+        if (
+            b.type in (BlockType.HEADING, BlockType.PARAGRAPH, BlockType.LIST)
+            and txt
+            and b.source_page is not None
+            and _normalized_fragment_key(txt) in repeated_keys
+        ):
+            continue
+        out.append(b)
+    return out

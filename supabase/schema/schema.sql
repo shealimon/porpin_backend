@@ -185,7 +185,8 @@ CREATE TABLE public.jobs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at TIMESTAMPTZ,
   quoted_payg_inr NUMERIC(10, 2) NOT NULL DEFAULT 0,
-  translation_attempt INTEGER NOT NULL DEFAULT 0
+  translation_attempt INTEGER NOT NULL DEFAULT 0,
+  translation_target VARCHAR(16) NOT NULL DEFAULT 'hinglish'
 );
 
 CREATE INDEX idx_jobs_user_id ON public.jobs (user_id);

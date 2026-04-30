@@ -36,19 +36,31 @@ def parse_txt(
             continue
         if all(_is_bullet_line(ln) for ln in lines):
             text = "\n".join(_strip_bullet(ln) for ln in lines)
+            ordered = all(
+                bool(re.match(r"^\d+[\.)]\s+", ln.lstrip())) for ln in lines
+            )
+            list_kind = "ordered" if ordered else "bullet"
             w = _word_count_str(text)
             if budget is None:
-                blocks.append(ContentBlock(type=BlockType.LIST, text=text))
+                blocks.append(
+                    ContentBlock(type=BlockType.LIST, text=text, list_kind=list_kind)
+                )
                 continue
             remain = budget - used
             if remain < 1:
                 break
             if w <= remain:
-                blocks.append(ContentBlock(type=BlockType.LIST, text=text))
+                blocks.append(
+                    ContentBlock(type=BlockType.LIST, text=text, list_kind=list_kind)
+                )
                 used += w
             else:
                 blocks.append(
-                    ContentBlock(type=BlockType.LIST, text=_trim_words(text, remain))
+                    ContentBlock(
+                        type=BlockType.LIST,
+                        text=_trim_words(text, remain),
+                        list_kind=list_kind,
+                    )
                 )
                 break
             continue

@@ -1,0 +1,10 @@
+<header class="doc-landmark">
+  <h1 class="doc-title">{{ title }}</h1>
+</header>
+{% from "_macros.j2" import render_block %}
+{% for row in bilingual_pairs %}
+<section class="doc-bilingual-row">
+  <div class="doc-bilingual-col doc-bilingual-col--source">{{ render_block(row.source) }}</div>
+  <div class="doc-bilingual-col doc-bilingual-col--target">{{ render_block(row.target) }}</div>
+</section>
+{% endfor %}
