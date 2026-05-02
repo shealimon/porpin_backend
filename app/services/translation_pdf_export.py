@@ -9,6 +9,7 @@ import logging
 from pathlib import Path
 
 from app.models.structured_document import StructuredDocument
+from app.services.formatter.html_to_pdf_weasyprint import WEASYPRINT_OSDEPS_INSTALL_HINT
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +37,18 @@ def export_translation_pdf(
                 source_structured=source_structured,
             )
         except Exception as e:
-            logger.warning(
-                "WeasyPrint PDF from structure failed (%s); falling back to DOCX→PDF.",
+            logger.error(
+                "WeasyPrint PDF from structure failed (%s: %s). Falling back to DOCX→PDF "
+                "(themed headings/TOC will be missing until WeasyPrint works). %s",
+                type(e).__name__,
                 e,
-                exc_info=logger.isEnabledFor(logging.DEBUG),
+                WEASYPRINT_OSDEPS_INSTALL_HINT,
+                exc_info=True,
             )
     else:
-        logger.info(
-            "PDF: no structure sidecar at %s — chapter HTML/CSS (WeasyPrint) is skipped; "
-            "using DOCX→PDF only (adds .structure.json next to the DOCX to enable WeasyPrint).",
+        logger.warning(
+            "PDF: structured sidecar missing (%r); skipping WeasyPrint-themed PDF "
+            "(expected *.structure.json beside the DOCX). Using DOCX→PDF fallback.",
             structure_json_path,
         )
     from app.services.pipeline_runner import try_convert_docx_to_pdf

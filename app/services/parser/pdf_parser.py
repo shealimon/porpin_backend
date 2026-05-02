@@ -147,6 +147,38 @@ def _estimate_body_fontsize(doc: fitz.Document) -> float:
     return sizes[len(sizes) // 2]
 
 
+def _word_count_quick(text: str) -> int:
+    return len(re.findall(r"\S+", text or ""))
+
+
+def _looks_like_pdf_typographic_heading(
+    text: str,
+    *,
+    body_font: float | None,
+    max_size: float,
+) -> bool:
+    """Line(s) typed like body font but visually a section title (common in scanned books).
+
+    PyMuPDF only gives headings when fontsize clearly exceeds ``body_font``; many PDFs keep
+    the same point size so "INTRODUCTION" becomes a PARAGRAPH, merges into body → flat PDF/docx.
+    """
+    if body_font is not None and max_size >= body_font + 1.5:
+        return False
+    t = " ".join((text or "").split()).strip()
+    if len(t) < 3 or len(t) > 120:
+        return False
+    wc = _word_count_quick(t)
+    if wc < 1 or wc > 16:
+        return False
+    if t.endswith(".") and wc > 5:
+        return False
+    letters = [c for c in t if c.isalpha()]
+    if not letters:
+        return False
+    upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+    return upper_ratio >= 0.88
+
+
 def _flush_pdf_line_buffer(
     line_buffer: list[tuple[float, str]],
     body_font: float,
@@ -167,6 +199,17 @@ def _flush_pdf_line_buffer(
                 type=BlockType.HEADING,
                 text=text,
                 level=level,
+                source_page=source_page,
+            )
+        )
+    elif _looks_like_pdf_typographic_heading(
+        text, body_font=body_font, max_size=max_sz
+    ):
+        out.append(
+            ContentBlock(
+                type=BlockType.HEADING,
+                text=text,
+                level=2,
                 source_page=source_page,
             )
         )
@@ -250,6 +293,17 @@ def _merge_short_paragraphs(blocks: list[ContentBlock], max_gap: int = 2) -> lis
         b = blocks[i]
         if b.type != BlockType.PARAGRAPH or not b.text:
             merged.append(b)
+            i += 1
+            continue
+        if _looks_like_pdf_typographic_heading(b.text, body_font=None, max_size=0.0):
+            merged.append(
+                ContentBlock(
+                    type=BlockType.HEADING,
+                    text=b.text.strip(),
+                    level=2,
+                    source_page=b.source_page,
+                )
+            )
             i += 1
             continue
         parts = [b.text]

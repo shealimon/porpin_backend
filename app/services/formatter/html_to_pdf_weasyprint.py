@@ -24,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 _APP_DIR = Path(__file__).resolve().parents[2]
 
+# Shown when WeasyPrint cannot load OS libraries (Ubuntu/Debian hosts without Docker deps).
+WEASYPRINT_OSDEPS_INSTALL_HINT = (
+    "Themed PDFs need WeasyPrint system libraries on the API host (Pango/Cairo/GDK pixbuf). "
+    "On Ubuntu/EC2 run `sudo bash scripts/install-weasyprint-deps-ubuntu.sh` from your deployed "
+    "`backend/` checkout (packages also listed in Dockerfile). Docs: "
+    "https://doc.courtbouillon.org/weasyprint/stable/first_steps.html "
+    "After apt install, restart **gunicorn** and **all RQ translation workers** (finalize runs PDF in "
+    "those processes: `python -m app.workers.rq_worker`). Until fixed, exports fall back to "
+    "DOCX→PDF (plain-looking)."
+)
+
 
 def default_html_base_url() -> str:
     """Directory URI for resolving relative assets (fonts, optional linked CSS)."""
@@ -387,7 +398,8 @@ def _weasyprint_html_class():
         raise RuntimeError(
             "WeasyPrint could not be loaded. Install OS libraries (Pango, Cairo, GObject) "
             "per https://doc.courtbouillon.org/weasyprint/stable/first_steps.html — on "
-            "Windows use the GTK3 runtime; in Docker use the backend image apt packages."
+            "Windows use the GTK3 runtime; in Docker use the backend image apt packages. "
+            f"{WEASYPRINT_OSDEPS_INSTALL_HINT}"
         ) from e
     _WEASYPRINT_HTML = HTML
     return _WEASYPRINT_HTML

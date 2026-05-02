@@ -101,7 +101,21 @@ async def lifespan(app: FastAPI):
 
         await asyncio.to_thread(_prewarm_doc_generation)
     except Exception as e:
-        logger.warning("Document template prewarm failed (first PDF/HTML request may be slower): %s", e)
+        if settings.is_production:
+            from app.services.formatter.html_to_pdf_weasyprint import (
+                WEASYPRINT_OSDEPS_INSTALL_HINT,
+            )
+
+            logger.error(
+                "Document template prewarm failed: %s. %s",
+                e,
+                WEASYPRINT_OSDEPS_INSTALL_HINT,
+            )
+        else:
+            logger.warning(
+                "Document template prewarm failed (first PDF/HTML request may be slower): %s",
+                e,
+            )
 
     async def _cleanup_loop() -> None:
         while True:
@@ -128,6 +142,23 @@ async def lifespan(app: FastAPI):
         if not settings.openai_api_key:
             logger.error(
                 "OPENAI_API_KEY is not set; translation will fail until configured.",
+            )
+        dev_only_origins = frozenset(
+            {
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+                "http://127.0.0.1:3000",
+                "http://localhost:3000",
+            },
+        )
+        cors = settings.cors_origins_list()
+        if cors and set(cors).issubset(dev_only_origins):
+            logger.warning(
+                "CORS_ORIGINS is still dev-localhost only (%s). Browsers on "
+                "https://www.<your-domain> calling a separate api.* host need production origins — "
+                "set CORS_ORIGINS=https://www.porpin.com,https://porpin.com "
+                "(comma-separated), restart workers, see backend/.env.example.",
+                settings.cors_origins,
             )
     try:
         yield
