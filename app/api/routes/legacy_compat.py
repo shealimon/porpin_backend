@@ -829,7 +829,11 @@ async def legacy_upload(request: Request, file: UploadFile = File(...)):
     if not data:
         raise HTTPException(status_code=400, detail="Empty file.")
     if settings.max_upload_bytes > 0 and len(data) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="File too large.")
+        mb = round(settings.max_upload_bytes / (1024 * 1024), 1)
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {mb} MB on API). Raise MAX_UPLOAD_BYTES to increase.",
+        )
 
     job_id = str(uuid.uuid4())
     path = settings.temp_dir / f"milestone_{job_id}{suffix}"
@@ -936,7 +940,11 @@ async def legacy_api_create_job(request: Request, file: UploadFile = File(...)):
     if not data:
         raise HTTPException(status_code=400, detail="Empty file.")
     if settings.max_upload_bytes > 0 and len(data) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="File too large.")
+        mb = round(settings.max_upload_bytes / (1024 * 1024), 1)
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {mb} MB on API). Raise MAX_UPLOAD_BYTES to increase.",
+        )
 
     job_id = str(uuid.uuid4())
     path = settings.temp_dir / f"milestone_{job_id}{suffix}"
