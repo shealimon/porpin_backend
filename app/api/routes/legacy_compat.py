@@ -1,7 +1,7 @@
 """
 Routes expected by the existing React dashboard (apiClient + backendClient).
 
-- POST /upload — word estimate (FileInputBar); no ``jobs`` DB row until confirm/start
+- POST /upload — word estimate (FileInputBar); optional Redis snapshot shares in-memory milestone state across API workers when ``REDIS_URL`` is set; no ``jobs`` DB row until confirm/start
 - POST /api/jobs — draft upload (optional flows using apiClient jobs helpers)
 - POST /api/jobs/{id}/estimate — word count + INR estimate
 - POST /api/jobs/{id}/start — queue same worker as /job/confirm
@@ -14,6 +14,7 @@ Routes expected by the existing React dashboard (apiClient + backendClient).
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -22,6 +23,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -36,6 +38,7 @@ from app.db.session import get_session_factory
 from app.deps.supabase_auth import AuthProfile, resolve_auth_profile_with_anonymous_fallback
 from app.services.parser import parse_document
 from app.jobs.job_progress import publish_translation_progress, read_translation_progress
+from app.jobs.redis_sync import get_sync_redis
 from app.services.pipeline_runner import run_pipeline
 from app.services.structured_document_builder import structured_json_path_for_docx
 from app.services.translation_pdf_export import export_translation_pdf
@@ -125,6 +128,193 @@ class _MilestoneState:
 
 
 _ALLOWED = frozenset({".pdf", ".docx", ".txt", ".epub", ".ebup"})
+
+
+_LEGACY_MILESTONE_REDIS_SUFFIX = ":milestone_state"
+_LEGACY_MILESTONE_REDIS_TTL_SEC = 86400 * 2
+_LEGACY_SNAPSHOT_VER = 1
+
+
+def _legacy_milestone_redis_key(job_id: str) -> str:
+    return f"translator:job:{job_id}{_LEGACY_MILESTONE_REDIS_SUFFIX}"
+
+
+def _legacy_safe_abs_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
+
+def _legacy_milestone_snapshot_to_dict(st: _MilestoneState) -> dict[str, Any]:
+    """JSON-serialize milestone UI state for cross-worker restores (needs Redis)."""
+    oux = _legacy_safe_abs_path(st.output_docx)
+    updf = _legacy_safe_abs_path(st.output_pdf)
+    persist = (
+        str(st.persist_user_id) if st.persist_user_id is not None else None
+    )
+    bs = st.billing_snapshot
+    bs_out: dict | None = bs if bs is None or isinstance(bs, dict) else None
+    return {
+        "v": _LEGACY_SNAPSHOT_VER,
+        "job_id": st.job_id,
+        "input_relpath": st.input_path.name,
+        "file_name": st.file_name,
+        "created_at": st.created_at,
+        "word_count": max(0, int(st.word_count)),
+        "estimated_cost": float(st.estimated_cost or 0),
+        "status": st.status,
+        "progress_percent": int(st.progress_percent or 0),
+        "error_message": st.error_message,
+        "output_docx_abs": oux,
+        "output_pdf_abs": updf,
+        "persist_user_id": persist,
+        "billing_snapshot": bs_out,
+        "preview_eligible": bool(st.preview_eligible),
+        "document_page_count": int(st.document_page_count or 1),
+        "preview_pages_cap": int(st.preview_pages_cap or 3),
+        "translation_target": str(st.translation_target or "hinglish"),
+    }
+
+
+def _legacy_milestone_from_snapshot_payload(
+    d: dict[str, Any], *, settings: Any
+) -> _MilestoneState | None:
+    if int(d.get("v") or 0) != _LEGACY_SNAPSHOT_VER:
+        return None
+    job_id_val = str(d.get("job_id") or "").strip()
+    rel = str(d.get("input_relpath") or "").strip()
+    fn = str(d.get("file_name") or "").strip()
+    created = str(d.get("created_at") or "")
+    uid_raw = d.get("persist_user_id")
+    try:
+        persist: uuid.UUID | None = (
+            uuid.UUID(str(uid_raw)) if uid_raw else None
+        )
+    except (ValueError, TypeError):
+        persist = None
+    doc = settings.temp_dir / rel
+    if not doc.is_file():
+        logger.debug(
+            "skip milestone Redis restore — missing upload file (%s)",
+            doc,
+        )
+        return None
+    status_saved = str(d.get("status") or "estimated")
+
+    wc = max(0, int(d.get("word_count") or 0))
+    ecost = float(d.get("estimated_cost") or 0)
+
+    if status_saved == "pending_estimate":
+        st = _MilestoneState(
+            job_id_val,
+            doc,
+            fn or "upload",
+            created or datetime.now(timezone.utc).isoformat(),
+            persist_user_id=persist,
+        )
+        st.preview_eligible = bool(d.get("preview_eligible", False))
+        st.document_page_count = max(1, int(d.get("document_page_count") or 1))
+        st.preview_pages_cap = max(1, int(d.get("preview_pages_cap") or 3))
+        st.translation_target = str(
+            d.get("translation_target") or st.translation_target
+        )
+        st.progress_percent = int(d.get("progress_percent") or 0)
+    else:
+        st = _MilestoneState(
+            job_id_val,
+            doc,
+            fn or "upload",
+            created or datetime.now(timezone.utc).isoformat(),
+            word_count=wc,
+            estimated_cost=ecost,
+            persist_user_id=persist,
+        )
+        st.status = status_saved
+        st.progress_percent = int(d.get("progress_percent") or 0)
+        st.preview_eligible = bool(d.get("preview_eligible", False))
+        st.document_page_count = max(1, int(d.get("document_page_count") or 1))
+        st.preview_pages_cap = max(1, int(d.get("preview_pages_cap") or 3))
+        st.translation_target = str(
+            d.get("translation_target") or st.translation_target
+        )
+
+    em = d.get("error_message")
+    st.error_message = str(em) if em is not None else None
+
+    bs = d.get("billing_snapshot")
+    st.billing_snapshot = bs if isinstance(bs, dict) else None
+
+    od = d.get("output_docx_abs")
+    pd = d.get("output_pdf_abs")
+
+    op_docx = Path(str(od)) if od else None
+    if op_docx is not None:
+        if not op_docx.is_file():
+            op_docx = None
+        st.output_docx = op_docx
+    op_pdf = Path(str(pd)) if pd else None
+    if op_pdf is not None:
+        if not op_pdf.is_file():
+            op_pdf = None
+        st.output_pdf = op_pdf
+
+    return st
+
+
+def _legacy_maybe_restore_milestone_from_redis(job_id: str) -> None:
+    """If milestone state exists in Redis but not in this worker, reconstruct it locally."""
+    settings = get_pipeline_settings()
+    if not settings.redis_url:
+        return
+    with _milestone_lock:
+        if job_id in _milestone_jobs:
+            return
+    try:
+        r = get_sync_redis()
+        raw = r.get(_legacy_milestone_redis_key(job_id))
+        if not raw:
+            return
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return
+    except Exception:
+        logger.debug("milestone Redis restore parse failed job_id=%s", job_id, exc_info=True)
+        return
+    st = _legacy_milestone_from_snapshot_payload(payload, settings=settings)
+    if st is None:
+        return
+    with _milestone_lock:
+        if job_id in _milestone_jobs:
+            return
+        _milestone_jobs[job_id] = st
+    logger.info("Restored milestone job state from Redis (job_id=%s)", job_id)
+
+
+def _legacy_publish_milestone(job_id: str) -> None:
+    """Persist current in-process milestone snapshot to Redis (multi-worker deployments)."""
+    settings = get_pipeline_settings()
+    if not settings.redis_url:
+        return
+    with _milestone_lock:
+        st = _milestone_jobs.get(job_id)
+        if st is None:
+            return
+        payload = _legacy_milestone_snapshot_to_dict(st)
+    try:
+        get_sync_redis().set(
+            _legacy_milestone_redis_key(job_id),
+            json.dumps(payload, separators=(",", ":")),
+            ex=_LEGACY_MILESTONE_REDIS_TTL_SEC,
+        )
+    except Exception:
+        logger.debug(
+            "milestone Redis publish failed job_id=%s",
+            job_id,
+            exc_info=True,
+        )
 
 
 def _milestone_ui_status_to_db_job_status(milestone_status: str) -> str:
@@ -487,6 +677,7 @@ def _run_milestone_job(job_id: str) -> None:
         path = st.input_path
         tt = normalize_translation_target(getattr(st, "translation_target", None))
 
+    _legacy_publish_milestone(job_id)
     _legacy_update_job_row(job_id, status=JobStatus.PROCESSING.value)
 
     if not settings.openai_api_key:
@@ -501,6 +692,7 @@ def _run_milestone_job(job_id: str) -> None:
             status=JobStatus.FAILED.value,
             error_message="OPENAI_API_KEY is not configured.",
         )
+        _legacy_publish_milestone(job_id)
         return
 
     try:
@@ -546,6 +738,7 @@ def _run_milestone_job(job_id: str) -> None:
                 st.status = "completed"
                 st.progress_percent = 100
                 st.completed_at = time.monotonic()
+        _legacy_publish_milestone(job_id)
         _legacy_settle_milestone_billing(job_id)
         wc, ecost = 0, 0.0
         with _milestone_lock:
@@ -560,6 +753,7 @@ def _run_milestone_job(job_id: str) -> None:
             tokens_used=wc,
             cost_inr=ecost,
         )
+        _legacy_publish_milestone(job_id)
     except Exception as e:
         with _milestone_lock:
             st = _milestone_jobs.get(job_id)
@@ -573,10 +767,12 @@ def _run_milestone_job(job_id: str) -> None:
             status=JobStatus.FAILED.value,
             error_message=err,
         )
+        _legacy_publish_milestone(job_id)
 
 
 def activate_milestone_after_payg_payment(job_id_str: str) -> None:
     """After Razorpay verifies a per-job PAYG order, move milestone out of awaiting_payment and run the pipeline."""
+    _legacy_maybe_restore_milestone_from_redis(job_id_str)
     with _milestone_lock:
         st = _milestone_jobs.get(job_id_str)
         if st is None:
@@ -589,6 +785,7 @@ def activate_milestone_after_payg_payment(job_id_str: str) -> None:
             return
         st.status = "queued"
         st.progress_percent = 5
+    _legacy_publish_milestone(job_id_str)
     t = threading.Thread(target=_run_milestone_job, args=(job_id_str,), daemon=True)
     t.start()
 
@@ -641,6 +838,7 @@ def _run_milestone_preview_job(job_id: str) -> None:
         cap = max(1, int(st.preview_pages_cap))
         tt = normalize_translation_target(getattr(st, "translation_target", None))
 
+    _legacy_publish_milestone(job_id)
     _legacy_update_job_row(job_id, status=JobStatus.PROCESSING.value)
 
     if not settings.openai_api_key:
@@ -655,6 +853,7 @@ def _run_milestone_preview_job(job_id: str) -> None:
             status=JobStatus.FAILED.value,
             error_message="OPENAI_API_KEY is not configured.",
         )
+        _legacy_publish_milestone(job_id)
         return
 
     try:
@@ -732,11 +931,13 @@ def _run_milestone_preview_job(job_id: str) -> None:
                 st.status = "preview_ready"
                 st.progress_percent = 100
                 st.completed_at = time.monotonic()
+        _legacy_publish_milestone(job_id)
         _legacy_update_job_row(
             job_id,
             status=JobStatus.PREVIEW_READY.value,
             output_docx=docx,
         )
+        _legacy_publish_milestone(job_id)
     except Exception as e:
         with _milestone_lock:
             st = _milestone_jobs.get(job_id)
@@ -750,6 +951,7 @@ def _run_milestone_preview_job(job_id: str) -> None:
             status=JobStatus.FAILED.value,
             error_message=err,
         )
+        _legacy_publish_milestone(job_id)
 
 
 class UploadEstimateResponse(BaseModel):
@@ -871,6 +1073,7 @@ async def legacy_upload(request: Request, file: UploadFile = File(...)):
         st.preview_pages_cap = pcap
         _milestone_jobs[job_id] = st
 
+    _legacy_publish_milestone(job_id)
     return UploadEstimateResponse(
         job_id=job_id,
         file_name=file.filename or "upload",
@@ -959,23 +1162,30 @@ async def legacy_api_create_job(request: Request, file: UploadFile = File(...)):
             created,
             persist_user_id=profile.id if profile else None,
         )
+    _legacy_publish_milestone(job_id)
     return {"id": job_id}
 
 
 @api_router.post("/jobs/{job_id}/estimate")
 def legacy_api_estimate(job_id: str):
+    _legacy_maybe_restore_milestone_from_redis(job_id)
     with _milestone_lock:
         st = _milestone_jobs.get(job_id)
         if st is None:
             raise HTTPException(status_code=404, detail="Job not found.")
         if st.status != "pending_estimate":
-            return {
+            early = {
                 "jobId": st.job_id,
                 "wordCount": st.word_count,
                 "amountCents": int(round(st.estimated_cost * 100)),
                 "currency": "INR",
             }
-        input_path = st.input_path
+        else:
+            early = None
+            input_path = st.input_path
+    if early is not None:
+        _legacy_publish_milestone(job_id)
+        return early
 
     try:
         wc = _estimate_word_count_fast(input_path)
@@ -1006,6 +1216,7 @@ def legacy_api_estimate(job_id: str):
             "currency": "INR",
         }
 
+    _legacy_publish_milestone(job_id)
     return {
         "jobId": snapshot["jobId"],
         "wordCount": snapshot["wordCount"],
@@ -1017,6 +1228,7 @@ def legacy_api_estimate(job_id: str):
 @api_router.post("/jobs/{job_id}/start")
 def legacy_api_start(request: Request, job_id: str):
     profile = _legacy_try_profile(request)
+    _legacy_maybe_restore_milestone_from_redis(job_id)
     with _milestone_lock:
         st = _milestone_jobs.get(job_id)
         if st is None:
@@ -1034,6 +1246,7 @@ def legacy_api_start(request: Request, job_id: str):
     if profile:
         _legacy_sync_milestone_to_db_on_commit(job_id, profile)
 
+    _legacy_publish_milestone(job_id)
     t = threading.Thread(target=_run_milestone_job, args=(job_id,), daemon=True)
     t.start()
     return {"status": "queued"}
@@ -1361,6 +1574,7 @@ def legacy_job_confirm(request: Request, body: JobConfirmBody):
     profile = _legacy_try_profile(request)
     jid = body.job_id
     tgt = _translation_target_from_confirm_body(body)
+    _legacy_maybe_restore_milestone_from_redis(jid)
     with _milestone_lock:
         st = _milestone_jobs.get(jid)
         if st is None:
@@ -1405,6 +1619,7 @@ def legacy_job_confirm(request: Request, body: JobConfirmBody):
             "amount_to_pay": payg,
         }
         base.update(breakdown)
+        _legacy_publish_milestone(jid)
         return base
 
     if profile and get_session_factory():
@@ -1421,6 +1636,7 @@ def legacy_job_confirm(request: Request, body: JobConfirmBody):
     if profile:
         _legacy_sync_milestone_to_db_on_commit(jid, profile)
 
+    _legacy_publish_milestone(jid)
     t = threading.Thread(target=_run_milestone_job, args=(jid,), daemon=True)
     t.start()
     base = {"ok": True, "awaiting_payment": False}
@@ -1439,6 +1655,7 @@ def legacy_preview_start(request: Request, body: JobConfirmBody):
         )
     jid = body.job_id
     tgt = _translation_target_from_confirm_body(body)
+    _legacy_maybe_restore_milestone_from_redis(jid)
     with _milestone_lock:
         st = _milestone_jobs.get(jid)
         if st is None:
@@ -1470,6 +1687,7 @@ def legacy_preview_start(request: Request, body: JobConfirmBody):
         st2.progress_percent = 5
 
     _legacy_sync_milestone_to_db_on_commit(jid, profile)
+    _legacy_publish_milestone(jid)
     t = threading.Thread(target=_run_milestone_preview_job, args=(jid,), daemon=True)
     t.start()
     return {"ok": True, "status": "queued"}
@@ -1477,6 +1695,7 @@ def legacy_preview_start(request: Request, body: JobConfirmBody):
 
 @plain_router.get("/job/{job_id}", response_model=JobDetailDto)
 def legacy_job_status(request: Request, job_id: str):
+    _legacy_maybe_restore_milestone_from_redis(job_id)
     with _milestone_lock:
         st = _milestone_jobs.get(job_id)
     if st is not None:
@@ -1684,6 +1903,7 @@ def legacy_download_docx(request: Request, job_id: str):
 
 @outputs_router.get("/{job_id}/translated.pdf")
 def legacy_download_pdf(request: Request, job_id: str):
+    _legacy_maybe_restore_milestone_from_redis(job_id)
     with _milestone_lock:
         st = _milestone_jobs.get(job_id)
     if st is not None and st.output_pdf is not None and st.output_pdf.is_file():
