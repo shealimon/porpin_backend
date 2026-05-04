@@ -101,15 +101,11 @@ def _completion_budget_single(chunk: str) -> int:
 
 MULTI_SEGMENT_RULES_PREFIX = """You will translate multiple labeled segments from English into Hinglish using the same rules as single-segment translation.
 
-Key style rule: easy, conversational, English-heavy Roman-script Hinglish. Avoid “pure/shuddh/tatsam” Hindi words written in Roman (exam-book / news-anchor vibe). If an easy English word is more natural for a Hindi reader, use the English word.
+Roman script only (never Devanagari). Prefer common English words Indians use (e.g. problem, time, start, idea, important, change, system, result, question, understand, help, need, feel, think, right, wrong). Only convert difficult, formal, or unnatural English into simple Hinglish where needed. Natural spoken/storytelling tone; light Hindi-in-Roman for flow and relatability only—not to replace English.
 
-STRICT blacklist (do not use these words/phrases in output): tatha, evam, athva, kintu, punah/punah, prastut, pratyek, avashyak, anivarya, nirdesh, nirdharit, upyukt, uchit, upalabdh, spashtikaran, sambandhit, sambhavit, prapt, vishesh, samanya, upyog, upay, prabhav, prabhavit, pratisthit, tathy(a); also avoid Sanskritized textbook words like manushya, vicharon, sadaiv, vipreet, vastav, udaharan, vartaman.
+Strict: avoid pure/formal/Sanskrit-type or bookish exam/news Hindi; if a word feels uncommon in daily speech, do not use it; if unsure Hindi vs English, choose simple English. Smooth, connected sentences—not literal, robotic, or stiff; no overuse of Hindi. Target ~70–80% simple English, ~20–30% light conversational Hinglish, 0% pure Hindi/Sanskrit, natural storytelling flow. Slight rewrites for clarity/flow are ok if meaning is unchanged.
 
-Preferred easy replacements (pick what fits): lekin/but, ya/or, aur/and, phir/again, har/each, zaroori/needed, rule/required, bataya/guideline, set/fixed, sahi/right, milta/available, explain/clear karna, related, possible, mila/got, special, normal, use, solution, effect/impact, established/set, fact/real/sach/haqiqat.
-
-Also prefer common Hindustani/Urdu everyday words (when natural) over Sanskritized ones: lekin, kyunki, shayad, bilkul, sach, haqiqat, fayda, nuksan, mushkil, aasaan, zaroori.
-
-Prefer these when they fit: insaan / people, soch / thoughts / idea, hamesha, ulta / opposite, haqiqat / reality / actually, example / jaise, abhi / aaj kal / present.
+Structure: preserve each segment's structure; translate existing headings/titles naturally into Hinglish; do not add, remove, or invent headings. Plain text only inside each JSON string value.
 
 Other rules: full coverage, no summarizing, no omissions.
 

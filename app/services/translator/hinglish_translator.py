@@ -13,6 +13,7 @@ import httpx
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 
 from app.core.pipeline_settings import get_pipeline_settings
+from app.services.translation_target import HINGLISH, HINDI, normalize_translation_target
 from app.services.translator.openai_errors import openai_user_facing_message
 from app.services.translator.openai_payload import (
     MAX_CHAT_OUTPUT_TOKENS_CAP,
@@ -39,65 +40,130 @@ def _api_slot_sem_get() -> threading.Semaphore:
         return _api_slot_sem
 
 
-PROMPT_TEMPLATE = """You translate English into natural Hinglish in Roman script only (never Devanagari or other non-Latin scripts).
+HINGLISH_SYSTEM_MESSAGE = (
+    "You are an expert literary translator: English → high-quality natural Hinglish in Roman "
+    "(Latin) script for engaging books. Output must use only Latin letters—never Devanagari, "
+    "never other non-Latin scripts. Prefer everyday Indian English plus casual Hindi spelled "
+    "in Roman; never formal, Sanskritized, or bookish Hindi—even if spelled in Roman "
+    '(e.g. say "soch raha tha", never "vichaar kar raha tha"). '
+    "Follow the user message rules exactly. Reply with only the translation—no preamble or notes."
+)
 
-Aim for fluent, easy-to-read Hinglish for a wide audience—not stiff, not word-for-word when that breaks meaning. Preserve the source meaning exactly; rewrite for clarity only when needed.
 
-Easy English mix: prefer how people actually talk—lots of common English words Indians already use (e.g. problem, time, start, idea, important, change, system, result, question, understand, help, need, feel, think, right, wrong) woven with light Hindi-in-Roman. Do not reach for formal, literary, or “pure” Hindi or heavy Sanskrit words when a simpler English word or a shorter Roman phrase is clearer.
+PROMPT_TEMPLATE = """Translate the English below into natural, smooth Hinglish in Roman script.
 
-Hard rule — no “pure” or showy Hindi: if an average city reader would more easily grasp an English word than a formal Hindi synonym, use the English word. Avoid literary, news-anchor, or textbook-only vocabulary; avoid long Sanskrit compounds and rare synonyms. When you use Hindi, keep it to words people say every day in speech (simple Roman spellings). If unsure, choose the simpler, more English-heavy phrasing—never the fancier Hindi.
+Goal: effortless to read, conversational, immersive storytelling—not formal, not robotic, not literal. Prefer short-to-medium sentences. The reader should feel yeh padhna easy aur interesting hai.
 
-Avoid Sanskritized / exam-book Roman spellings (shuddh/tatsam Hindi written in Roman, often with vi-/va-/sa-/pra-/pary-/tathya-ish feel). Prefer everyday words or English—same idea, easier mouth-feel.
+STRICT RULES:
 
-STRICT blacklist (do not use these words/phrases in output): tatha, evam, athva, kintu, punah/punah, prastut, pratyek, avashyak, anivarya, nirdesh, nirdharit, upyukt, uchit, upalabdh, spashtikaran, sambandhit, sambhavit, prapt, vishesh, samanya, upyog, upay, prabhav, prabhavit, pratisthit, tathy(a). If you are about to use one, rewrite with simpler Hinglish instead.
+1) Language style (most important)
+- Flowing Hinglish: ideas explained smoothly, like someone talking, not translating.
+- Avoid stiff, heavy, or textbook tone.
+- Use light connectors where they help: toh, bas, lekin, aur yahi, simple hai, matlab, phir, waise, etc.
 
-Preferred easy replacements (pick what fits context): lekin/but, ya/or, aur/and, phir/again, har/each, zaroori/needed, rule/required, bataya/guideline, set/fixed, sahi/right, milta/available, explain/clear karna, related, possible, mila/got, special, normal, use, solution, effect/impact, established/set, fact/real/sach/haqiqat.
+2) Not robotic / literal
+- Do NOT translate word-for-word. Rewrite for clarity and flow while keeping meaning EXACT.
+- Break long, complex sentences when it helps.
 
-Also prefer common Hindustani/Urdu everyday words (when natural) over Sanskritized ones: lekin, kyunki, shayad, bilkul, haan, nahi, sach, haqiqat, fayda, nuksan, mushkil, aasaan, zaroori.
+3) Keep in English (do NOT translate)
+- Medical terms.
+- Numbers: years, dates, measurements, counts.
+- Month names (January, February, etc.).
+- Common/simple English Indians leave in English when speaking: ship, camp, crew, ice, plan, idea, team, food, water, system, action, result, problem, time, change, important, question, understand, help, need, feel, think, right, wrong, start—and similar words.
+- Any word that sounds more natural in English than a Hindi replacement.
 
-Illustrative swaps (not exhaustive; follow this spirit everywhere):
-• manushya → insaan / human / people
-• vichar / vicharon → soch / thoughts / idea
-• sadaiv → hamesha / always
-• vistarit → detail mein / detailed / in depth (not “vistarit”)
-• vipreet → opposite / ulta
-• vastav / vastavik → haqiqat / actually / in reality / real
-• udaharan → example / jaise
-• vartaman → present / abhi / aaj kal / current
+4) Hindi usage constraint (Roman must sound SPOKEN, not literary)
+- Avoid pure Hindi, Sanskrit-heavy, or exam/news bookish words—even in Roman spelling.
+- Every Hindi-flavored word must be what people actually say aloud, not shuddh/literary forms.
+Examples:
+- BAD: vichar / vichaar kar raha tha → GOOD: soch raha tha
+- BAD: kintu, athva, apeksha → GOOD: lekin, ya, umeed (only if natural in context)
+- If unsure between a heavy Hindi term and simple English → choose simple English.
 
-Never prefer the left-column style above when the right side reads more natural for a general reader.
+Style mix: roughly 70–80% simple English, 20–30% light conversational Roman Hindi for flow; 0% pure/formal Hindi register.
 
-Keep in English (do not translate): medical terms; numbers, dates, measurements; month names; other proper nouns and terms that stay in English in India. Where Hindi fits, still prefer everyday spoken phrasing (e.g. "soch raha tha" not "vichaar kar raha tha")—but lean English when that is easier for the reader.
+5) Structure / formatting
+- Preserve original paragraph breaks and block boundaries EXACTLY.
+- Do NOT add new headings or labels. If the source already has a title/heading line, keep it in the same role (plain text only—no Markdown; the pipeline strips **).
+- Do NOT use bullet points unless the source uses them. Maintain normal spacing between sentences.
 
-Translate dialogue and quoted speech into natural Hinglish the same way.
+6) Tone & quotes
+- Storytelling warmth and emotional depth; dialogues and quotes in the same natural Hinglish—human, not translated-sounding.
 
-Do not summarize, omit, or add content. Keep terminology consistent. Every source sentence must appear as Hinglish in Roman; rule exceptions above for embedded English words only—not whole English sentences.
+7) Accuracy (non-negotiable)
+- Do NOT summarize, skip, omit, or add interpretation. Coverage must be complete; meaning must stay EXACT.
 
-Structure: keep the same paragraph breaks and block boundaries as the source. Plain text only—no labels, preambles, or commentary. Do not use Markdown, HTML, or other markup in the translation.
+8) Consistency
+- Keep terminology consistent across the piece.
 
-OUTPUT: only the translation text.
+OUTPUT: return ONLY the Hinglish translation. No explanations or extra text.
 
 SOURCE TEXT:
 {chunk}"""
 
-HINDI_PROMPT_TEMPLATE = """You translate English into simple, conversational Hindi in Devanagari script only (never Roman/Latin letters for Hindi words—use देवनागरी).
 
-Aim for everyday Hindi that a city reader understands easily—not stiff Sanskritized news or textbook style. Preserve the source meaning; rewrite for clarity only when needed.
+def openai_messages_for_target(translation_target: str, user_content: str) -> list[dict[str, str]]:
+    if normalize_translation_target(translation_target) == HINDI:
+        return [{"role": "user", "content": user_content}]
+    return [
+        {"role": "system", "content": HINGLISH_SYSTEM_MESSAGE},
+        {"role": "user", "content": user_content},
+    ]
 
-Prefer common spoken words; avoid heavy तत्सम / formal compounds when a simpler phrase is clearer. When an English word is widely used in India (e.g. problem, system, email), you may keep it in Latin letters inside the Hindi sentence if that reads more natural—otherwise use simple Hindi.
 
-Illustrative spirit (prefer right column when the left feels heavy or literary):
-• मानव / मनुष्य → लोग / इंसान
-• विचार → सोच / ख्याल
-• सदैव → हमेशा
-• विपरीत → उल्टा / opposite sense in simple Hindi
-• वास्तविक → असल / सच में
-• उदाहरण → उदाहरण is fine; जैसे / for example also ok
-• वर्तमान → अभी / आजकल
+HINDI_PROMPT_TEMPLATE = """You translate English into simple, natural, conversational Hindi in Devanagari script only (never Roman/Latin letters for Hindi words—use देवनागरी).
 
-Do not summarize, omit, or add content. Keep paragraph breaks like the source. Plain text only—no Markdown or HTML.
+Goal: The output should feel like a human is naturally explaining or narrating the content in easy Hindi. It should be smooth, effortless to read, and enjoyable—like a story. The reader should never feel they are reading a translation.
 
-OUTPUT: only the Hindi translation in Devanagari.
+Core Style Rules:
+
+• Use simple, everyday Hindi that people actually speak in daily life.
+• Avoid formal, bookish, or news-style Hindi.
+• Prefer easy and familiar words over complex or heavy ones.
+
+• If a sentence sounds stiff, rewrite it to make it more natural and clear—without changing meaning.
+
+• You may keep commonly used English words (like problem, system, email, idea) in Latin script if that feels more natural and improves readability.
+
+Strict Language Rules (VERY IMPORTANT):
+
+• Avoid heavy, Sanskritized, or textbook-style Hindi.
+• Do NOT use uncommon or difficult Hindi words that people don't use in daily conversation.
+• If a simpler Hindi or common English word works better, always choose that.
+
+• If unsure between complex Hindi vs simple wording → choose the simpler option.
+
+Flow & Readability:
+
+• Sentences should feel smooth, connected, and natural—not literal translation.
+• Add light conversational flow so it feels like someone is explaining or narrating.
+• The output should be easy to read without mental effort.
+
+• You may slightly rewrite sentences for clarity and flow, but do NOT change meaning.
+
+Strict Avoid:
+
+• Literal word-by-word translation
+• Robotic or stiff tone
+• Overly formal or heavy Hindi
+• Complex or uncommon vocabulary
+
+Style Target:
+
+• Easy, spoken Hindi (primary)
+• Light mix of commonly used English words where natural
+• 100% smooth, story-like flow
+
+Structure Rules:
+
+• Preserve original structure exactly as it is
+• If the source text contains a chapter title, heading, or section label, keep it and translate it naturally into Hindi
+• Do NOT remove, modify, or add new headings
+• If no heading exists in the source, do NOT create one
+• Do not add or remove content
+• Keep paragraph breaks the same as the source
+
+OUTPUT: only the Hindi translation in Devanagari script.
 
 SOURCE TEXT:
 {chunk}"""
@@ -130,9 +196,7 @@ def translate_chunk(
             try:
                 resp = client.chat.completions.create(
                     model=model,
-                    messages=[
-                        {"role": "user", "content": prompt},
-                    ],
+                    messages=openai_messages_for_target(HINGLISH, prompt),
                     **temperature_kw(model, float(settings.translation_temperature)),
                     **completion_token_params(model, MAX_CHAT_OUTPUT_TOKENS_CAP),
                 )
