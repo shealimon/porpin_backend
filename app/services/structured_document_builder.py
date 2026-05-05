@@ -23,8 +23,27 @@ from app.models.structured_document import (
 from app.services.formatter.book_typography import strip_markdown_artifacts
 
 
+def _reflow_wrapped_paragraph_text(s: str) -> str:
+    """Collapse PDF/Word hard line wraps (single newlines) into spaces.
+
+    Blank-line gaps (``\\n\\n+``) are kept so one block can still represent multiple
+    logical stanzas; each stanza is reflowed to a single line of text.
+    """
+    t = (s or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not t:
+        return ""
+    chunks = [c for c in re.split(r"\n\s*\n+", t) if c.strip()]
+    reflowed: list[str] = []
+    for c in chunks:
+        line = " ".join(ln.strip() for ln in c.split("\n") if ln.strip())
+        if line:
+            reflowed.append(line)
+    return "\n\n".join(reflowed)
+
+
 def _clean_text(s: str | None) -> str:
-    return strip_markdown_artifacts(s or "").strip()
+    raw = strip_markdown_artifacts(s or "").strip()
+    return _reflow_wrapped_paragraph_text(raw)
 
 
 def _merge_title_lines(items: list[ClassifiedBlock]) -> str | None:
@@ -94,7 +113,10 @@ def _list_items_and_ordered(block: ContentBlock) -> tuple[list[str], bool]:
         ordered = False
     else:
         ordered = _infer_ordered_from_items([ln.strip() for ln in raw_lines])
-    items = [_normalize_list_item_line(ln, ordered=ordered) for ln in raw_lines]
+    items = [
+        _normalize_list_item_line(_reflow_wrapped_paragraph_text(strip_markdown_artifacts(ln).strip()), ordered=ordered)
+        for ln in raw_lines
+    ]
     items = [x for x in items if x]
     if not items:
         raw = _clean_text(block.text)
@@ -141,6 +163,12 @@ def _block_to_structured(
 
 
 def build_structured_document(classified: list[ClassifiedBlock]) -> StructuredDocument:
+    # Safety net: template/PDF paths must not show PDF echo duplicates even if a caller skipped translate-time dedupe.
+    from app.services.document_pipeline.paragraph_overlap_dedupe import (
+        dedupe_consecutive_redundant_translate_paragraphs,
+    )
+
+    classified = dedupe_consecutive_redundant_translate_paragraphs(list(classified))
     title_items, author_items, tail = _partition_front_matter(classified)
     title = _merge_title_lines(title_items)
     authors = _author_lines(author_items)

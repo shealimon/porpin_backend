@@ -88,3 +88,39 @@ def test_toc_tag_on_nodes():
     doc = build_structured_document(classified)
     assert len(doc.content) == 1
     assert doc.content[0].content_tag == "toc"
+
+
+def test_paragraph_collapses_hard_line_breaks_inside_stanza():
+    classified = [
+        ClassifiedBlock(
+            block=ContentBlock(
+                type=BlockType.PARAGRAPH,
+                text=(
+                    "Paanch\n"
+                    "hazaar theatres desh bhar mein meri kahani ko dikhane wale the "
+                    "jo kabhi bhi mere dimaag mein\n"
+                    "aayi thi."
+                ),
+            ),
+            action=SectionAction.TRANSLATE,
+        ),
+    ]
+    doc = build_structured_document(classified)
+    assert doc.content[0].type == "paragraph"
+    assert "\n" not in doc.content[0].text
+    assert "Paanch hazaar theatres" in doc.content[0].text
+    assert "dimaag mein aayi thi." in doc.content[0].text
+
+
+def test_paragraph_blank_line_keeps_two_stanzas_in_one_block():
+    classified = [
+        ClassifiedBlock(
+            block=ContentBlock(
+                type=BlockType.PARAGRAPH,
+                text="First stanza line one\nline two.\n\nSecond stanza here.",
+            ),
+            action=SectionAction.TRANSLATE,
+        ),
+    ]
+    doc = build_structured_document(classified)
+    assert doc.content[0].text == "First stanza line one line two.\n\nSecond stanza here."

@@ -43,6 +43,41 @@ def split_sentences(text: str) -> list[str]:
 
 
 _REF_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+# Sentence-ending punctuation before optional closing quotes/brackets (reuse for merge heuristics).
+_SENTENCE_COMPLETE_END = re.compile(
+    r"""[.!?…।]['"\u201d\u2019)\]]*\s*$""",
+    flags=re.UNICODE,
+)
+
+
+def sentence_appears_complete(text: str) -> bool:
+    """True when trailing text looks like end of sentence (paragraph merge / planning)."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.endswith("..."):
+        return True
+    return bool(_SENTENCE_COMPLETE_END.search(t))
+
+
+def first_non_space_char(s: str) -> str | None:
+    """First non-whitespace grapheme-ish char, or None if empty."""
+    for c in (s or ""):
+        if not c.isspace():
+            return c
+    return None
+
+
+def looks_like_sentence_continuation_line(text: str) -> bool:
+    """Next line clearly continues mid-sentence (do not merge as new paragraph after a period)."""
+    c = first_non_space_char(text or "")
+    if c is None:
+        return False
+    if not c.isalpha():
+        return True
+    return c.islower()
+
+
 _BRACKET_NUM = re.compile(r"\[[\d,\s–-]+\]")
 _URL = re.compile(r"https?://|www\.", re.I)
 _FIG_TABLE_SHORT = re.compile(
@@ -140,10 +175,17 @@ def plan_paragraph_for_translation(
     """
     Split a paragraph into sentences and mark which ones should be translated via the API.
     Others are returned verbatim (no GPT) to save cost and avoid inflated phrasing on boilerplate.
+
+    When ``max_api_word_ratio >= 1.0``, per-sentence skipping is disabled so the paragraph is sent
+    to the translator as one unit—avoids verbatim English stitched next to translated text.
     """
     para = (paragraph or "").strip()
     if not para:
         return []
+    # Full-literary translation: whole paragraph goes to GPT (recommended for books at ratio 1.0).
+    if max_api_word_ratio >= 1.0:
+        return [SentencePlan(para, True)]
+
     sents = split_sentences(para)
     if not sents:
         return [SentencePlan(para, not _should_skip_sentence_heuristic(para))]

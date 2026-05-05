@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import unicodedata
 
 # Align with batch_translator caps for chat.completions output.
@@ -43,6 +44,54 @@ def sanitize_user_text(text: str) -> str:
     except Exception:
         pass
     return text
+
+
+# --- Model-output cleanup (bad batch completions / echoed instructions) ---
+_LINE_ONLY_JSON_ECHO = re.compile(
+    r"(?is)^(?:\s*(?:assistant\s+)?(?:to\s*=\s*json\s+code\b\s*)){3,}$"
+)
+
+# Typical PDF recto/verso bleed: "WHITE NIGHTS WHITE NIGHTS 14"
+_LINE_DUP_ALLCAPS_RUNNING_HEAD = re.compile(
+    r"(?m)^(?P<t>[A-Z]{2,}(?:\s+[A-Z]{2,}){0,8})\s+(?P=t)(?:\s+\d{1,4})?\s*$"
+)
+
+_INLINE_JSON_ECHO_RUN = re.compile(
+    r"(?is)(?:\bassistant\b\s*)?(?:to\s*=\s*json\s+code\b\s*){2,}"
+)
+
+
+def sanitize_translated_output(text: str | None) -> str:
+    """Strip instruction echo / JSON-batch junk models sometimes leak into segment strings."""
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    raw = sanitize_user_text(text)
+    if not raw.strip():
+        return raw.strip()
+    t = raw.replace("\r\n", "\n").replace("\r", "\n")
+    out_lines: list[str] = []
+    for line in t.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            out_lines.append("")
+            continue
+        if _LINE_ONLY_JSON_ECHO.fullmatch(stripped):
+            continue
+        m_head = _LINE_DUP_ALLCAPS_RUNNING_HEAD.fullmatch(stripped)
+        if m_head is not None and len(m_head.group("t").replace(" ", "")) >= 6:
+            continue
+        cleaned = _INLINE_JSON_ECHO_RUN.sub(" ", line)
+        cleaned = " ".join(cleaned.split())
+        if cleaned.strip():
+            out_lines.append(cleaned.strip())
+        else:
+            out_lines.append("")
+    result = "\n".join(out_lines)
+    while "\n\n\n" in result:
+        result = result.replace("\n\n\n", "\n\n")
+    return result.strip()
 
 
 def finite_temperature(temp: float, *, default: float = 0.0) -> float:

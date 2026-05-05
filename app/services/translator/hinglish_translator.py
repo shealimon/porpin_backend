@@ -19,6 +19,7 @@ from app.services.translator.openai_payload import (
     MAX_CHAT_OUTPUT_TOKENS_CAP,
     completion_token_params,
     normalize_openai_model,
+    sanitize_translated_output,
     sanitize_user_text,
     temperature_kw,
 )
@@ -46,7 +47,8 @@ HINGLISH_SYSTEM_MESSAGE = (
     "never other non-Latin scripts. Prefer everyday Indian English plus casual Hindi spelled "
     "in Roman; never formal, Sanskritized, or bookish Hindi—even if spelled in Roman "
     '(e.g. say "soch raha tha", never "vichaar kar raha tha"). '
-    "Follow the user message rules exactly. Reply with only the translation—no preamble or notes."
+    "Follow the user message rules exactly. Reply with only the translation—no preamble, notes, "
+    "or stray tokens like Assistant or to=JSON code."
 )
 
 
@@ -95,6 +97,11 @@ Style mix: roughly 70–80% simple English, 20–30% light conversational Roman 
 
 8) Consistency
 - Keep terminology consistent across the piece.
+
+9) Mixed English + no echo / duplication (VERY IMPORTANT)
+- Translate the FULL excerpt end-to-end. Do not leave plain English intact for some clauses and heavily rewrite neighbouring clauses—it looks half-finished.
+- Borrowed/simple English nouns/tools are OK only where rule (3) says; do not bolt them on AGAIN after an equivalent Hindi/Hinglish wording (avoid “thinking ko soch…” / doubling the same idea in both languages unless people really say both aloud).
+- Say each idea ONCE with one natural wording; strip redundant English scaffolding.
 
 OUTPUT: return ONLY the Hinglish translation. No explanations or extra text.
 
@@ -238,7 +245,7 @@ def translate_chunk(
         if not content:
             logger.warning("Empty translation for chunk; echoing source")
             return chunk
-        return content
+        return sanitize_translated_output(content)
     _msg = (
         f"OpenAI failed after {max_retries} attempts: "
         f"{openai_user_facing_message(last_err) if last_err else 'unknown'}"

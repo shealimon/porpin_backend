@@ -11,6 +11,10 @@ from docx.text.paragraph import Paragraph
 
 from app.models.document_models import BlockType, ClassifiedBlock, SectionAction
 from app.services.formatter.book_typography import strip_markdown_artifacts
+from app.services.formatter.chapter_heading_policy import (
+    chapter_start_level,
+    is_chapter_outline_level,
+)
 from app.services.formatter.document_builder import (
     _apply_body_paragraph,
     _apply_list_paragraph,
@@ -37,6 +41,13 @@ def apply_translations_inplace(
     doc = Document(str(source_path))
     _configure_document_defaults(doc)
 
+    heading_levels = [
+        max(1, min(9, cb.block.level))
+        for cb in classified
+        if cb.block.type == BlockType.HEADING and cb.action != SectionAction.OMIT
+    ]
+    chapter_min = chapter_start_level(heading_levels)
+
     idx = 0
     body = doc.element.body
     first_main_heading = True
@@ -62,25 +73,45 @@ def apply_translations_inplace(
             cb = classified[idx]
             idx += 1
             if cb.action == SectionAction.OMIT:
-                if cb.block.type == BlockType.HEADING and cb.block.level == 1:
-                    first_main_heading = False
+                if cb.block.type == BlockType.HEADING:
+                    _omit_t = strip_markdown_artifacts(cb.block.text or "")
+                    _omit_lvl = max(1, min(9, cb.block.level))
+                    if is_chapter_outline_level(
+                        _omit_lvl, chapter_min, heading_text=_omit_t
+                    ):
+                        first_main_heading = False
                 _clear_paragraph_runs(para)
                 continue
             if cb.action == SectionAction.SKIP:
-                if cb.block.type == BlockType.HEADING and cb.block.level == 1:
-                    first_main_heading = False
+                if cb.block.type == BlockType.HEADING:
+                    _sk_t = strip_markdown_artifacts(cb.block.text or "")
+                    _sk_lvl = max(1, min(9, cb.block.level))
+                    if is_chapter_outline_level(
+                        _sk_lvl, chapter_min, heading_text=_sk_t
+                    ):
+                        first_main_heading = False
                 continue
             new_text = strip_markdown_artifacts(cb.block.text or "")
             bt = cb.block.type
             if bt == BlockType.HEADING:
                 lvl = max(1, min(9, cb.block.level))
-                if lvl == 1:
+                if is_chapter_outline_level(
+                    lvl, chapter_min, heading_text=new_text
+                ):
+                    try:
+                        para.style = doc.styles["Heading 1"]
+                    except KeyError:
+                        pass
                     brk = not first_main_heading
                     first_main_heading = False
                     _apply_main_heading_paragraph(
                         para, new_text, page_break_before=brk
                     )
                 else:
+                    try:
+                        para.style = doc.styles[f"Heading {min(lvl, 9)}"]
+                    except KeyError:
+                        pass
                     _apply_sub_heading_paragraph(para, new_text)
             elif bt == BlockType.LIST:
                 _apply_list_paragraph(para, new_text)

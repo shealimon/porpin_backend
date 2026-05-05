@@ -30,3 +30,23 @@ def test_pdf_promotes_standalone_typographic_heading_paragraphs():
     out = _merge_short_paragraphs(blocks)
     assert out[0].type == BlockType.HEADING
     assert out[0].text == "WORKS CITED"
+
+
+def test_pdf_all_caps_body_opening_not_heading():
+    """Opening small-caps line + continuation must stay paragraph flow (see typographic books)."""
+    assert not _looks_like_pdf_typographic_heading(
+        (
+            "THE GODFATHER IS ONE OF MY FAVORITE MOVIES, "
+            "IN PART BECAUSE OF THE MANY"
+        ),
+        body_font=11.0,
+        max_size=11.0,
+    )
+
+
+def test_pdf_all_caps_clause_end_not_heading():
+    assert not _looks_like_pdf_typographic_heading(
+        "THIS IS A SHORT LINE THAT ENDS WITH A COMMA,",
+        body_font=11.0,
+        max_size=11.0,
+    )

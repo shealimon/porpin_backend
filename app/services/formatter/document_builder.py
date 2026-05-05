@@ -23,6 +23,7 @@ from app.services.formatter.book_typography import (
     LIBRE_BASKERVILLE,
     strip_markdown_artifacts,
 )
+from app.services.formatter.book_structure import should_exclude_from_exported_toc
 from app.services.formatter.chapter_heading_policy import (
     is_chapter_outline_level,
     chapter_start_level,
@@ -242,6 +243,8 @@ def _partition_export_blocks(
         elif b.structural_tag == StructuralTag.AUTHOR and b.type != BlockType.TABLE:
             author.append(item)
         elif b.structural_tag == StructuralTag.TOC:
+            if should_exclude_from_exported_toc(b.text):
+                continue
             toc.append(item)
         else:
             body.append(item)
@@ -382,7 +385,7 @@ def _append_body_block(
 
     if b.type == BlockType.HEADING:
         level = max(1, min(9, b.level))
-        if is_chapter_outline_level(level, chapter_min_level):
+        if is_chapter_outline_level(level, chapter_min_level, heading_text=text):
             p = doc.add_paragraph(style="Heading 1")
             brk = body_started[0]
             _apply_main_heading_paragraph(p, text, page_break_before=brk)

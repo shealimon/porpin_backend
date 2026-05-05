@@ -174,7 +174,9 @@ def structured_to_document_for_template(doc: StructuredDocument) -> DocumentForT
                 BlockHeadingModel(
                     text=heading_text,
                     level=_heading_level_to_template_level(raw.level),
-                    chapter_start=is_chapter_outline_level(raw.level, chapter_lvl),
+                    chapter_start=is_chapter_outline_level(
+                        raw.level, chapter_lvl, heading_text=heading_text
+                    ),
                     anchor=anchor,
                 )
             )
@@ -217,7 +219,7 @@ def render_structured_document_html(
         return render_bilingual_document_html(source_doc, doc, resolved)
     m = structured_to_document_for_template(doc)
 
-    # Build a TOC from the final rendered block list (post-merge). This guarantees every
+    # Build a TOC from the final rendered block list (post-normalization). This guarantees every
     # TOC href points to an existing `id=...` in the emitted HTML.
     from app.services.document_template_render.render import _get_jinja_env  # type: ignore
     from app.services.document_template_render.css import indented_css_for_template
@@ -227,7 +229,7 @@ def render_structured_document_html(
 
     toc: list[dict[str, object]] = []
     try:
-        # `ctx["blocks"]` is a list of dicts (already merged/normalized).
+        # `ctx["blocks"]` is a list of dicts (normalized for template view).
         if ctx.get("use_chapters"):
             # Chapters mode is rare for structured docs, but handle it anyway.
             # Only TOC chapter titles (and optional one-level subheads) are supported here.

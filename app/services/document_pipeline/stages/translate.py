@@ -10,6 +10,9 @@ from collections.abc import Callable
 from app.core.pipeline_settings import get_pipeline_settings
 from app.jobs.job_progress import publish_translation_progress
 from app.models.document_models import ClassifiedBlock
+from app.services.document_pipeline.paragraph_overlap_dedupe import (
+    dedupe_consecutive_redundant_translate_paragraphs,
+)
 from app.services.translation_plan import build_translation_plan, reassemble_from_plan
 from app.services.translation_target import (
     normalize_translation_target,
@@ -88,10 +91,14 @@ def translate_classified_blocks(
         stage_timings["translate_wall_clock_s"] = 0.0
         stage_timings["response_aggregation_reassemble_s"] = 0.0
         stage_timings["translation_api_per_batch_wall_sum_s"] = 0.0
-        return classified, stage_timings, {
-            "api_segment_count": 0,
-            "translate_batch_count": batch_count,
-        }
+        return (
+            dedupe_consecutive_redundant_translate_paragraphs(classified),
+            stage_timings,
+            {
+                "api_segment_count": 0,
+                "translate_batch_count": batch_count,
+            },
+        )
 
     n_seg = len(global_jobs)
     api_batch_wall_accum: list[float] = [0.0]
@@ -175,6 +182,9 @@ def translate_classified_blocks(
 
     t_re = time.perf_counter()
     translated_classified = reassemble_from_plan(block_work, translated_texts)
+    translated_classified = dedupe_consecutive_redundant_translate_paragraphs(
+        translated_classified,
+    )
     reassemble_s = time.perf_counter() - t_re
     stage_timings["translate_wall_clock_s"] = translate_wall
     stage_timings["response_aggregation_reassemble_s"] = reassemble_s

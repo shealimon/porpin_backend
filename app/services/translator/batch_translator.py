@@ -27,6 +27,7 @@ from app.services.translator.openai_payload import (
     model_supports_response_format_json_object,
     model_supports_structured_outputs_json_schema,
     normalize_openai_model,
+    sanitize_translated_output,
     sanitize_user_text,
     temperature_kw,
 )
@@ -105,6 +106,9 @@ Roman script only (never Devanagari). Prefer common English words Indians use (e
 
 Strict: avoid pure/formal/Sanskrit-type or bookish exam/news Hindi; if a word feels uncommon in daily speech, do not use it; if unsure Hindi vs English, choose simple English. Smooth, connected sentences—not literal, robotic, or stiff; no overuse of Hindi. Target ~70–80% simple English, ~20–30% light conversational Hinglish, 0% pure Hindi/Sanskrit, natural storytelling flow. Slight rewrites for clarity/flow are ok if meaning is unchanged.
 
+No stitched output: translate each segment wholly; avoid leaving untouched English clauses mixed with rewritten text. Do not echo the same idea twice (English+Hinglish) unless it is natural idiomatic repetition.
+Never include the words Assistant, to=JSON, code, segment keys, or JSON instructions inside any translation string—the output values must be book prose only.
+
 Structure: preserve each segment's structure; translate existing headings/titles naturally into Hinglish; do not add, remove, or invent headings. Plain text only inside each JSON string value.
 
 Other rules: full coverage, no summarizing, no omissions.
@@ -118,6 +122,7 @@ Example: {"0":"...","1":"...","2":"..."}
 MULTI_SEGMENT_RULES_HINDI_PREFIX = """You will translate multiple labeled segments from English into simple conversational Hindi in Devanagari using the same rules as single-segment translation (everyday words, not heavy Sanskrit; full coverage, no summarizing).
 
 Return one JSON object (not an array) with string keys "0" through "{last_idx}" only—one per segment, no gaps. Each value is one JSON string: the plain translation for that segment in Devanagari (escape quotes and newlines per JSON). Each string must be plain text only—no Markdown, HTML, or styling markup.
+Never include the words Assistant, to=JSON, code, segment keys, or JSON instructions inside any translation string—Devanagari prose only.
 Output that object directly with no extra keys, no wrapper objects, and no text before or after the JSON.
 
 Example: {"0":"...","1":"...","2":"..."}
@@ -225,7 +230,7 @@ def _coerce_nested_segment_value(v: object, depth: int = 0) -> str | None:
         return None
     s = _json_segment_value_to_str(v)
     if s is not None:
-        return s
+        return sanitize_translated_output(s)
     if isinstance(v, list):
         parts: list[str] = []
         for item in v:
@@ -538,6 +543,9 @@ async def _async_translate_one(
                 on_tokens(total)
         if not content:
             return chunk
+        content = sanitize_translated_output(content)
+        if not content.strip():
+            return chunk
         if settings.translation_cache_enabled and settings.redis_url:
 
             def _cache_put() -> None:
@@ -686,7 +694,7 @@ async def _openai_translate_multi_segment(
 
         parsed_set = _parse_multi_segment_json(content, len(segments))
         if parsed_set is not None:
-            return parsed_set
+            return [sanitize_translated_output(s) for s in parsed_set]
 
         if rf_idx + 1 < len(batch_rf_formats):
             rf_idx += 1
@@ -770,7 +778,7 @@ async def _async_translate_multi(
             miss_idx.append(i)
 
     if not miss_idx:
-        return [str(merged[i]) for i in range(len(segments))]
+        return [sanitize_translated_output(str(merged[i])) for i in range(len(segments))]
 
     work_segs = [segments[i] for i in miss_idx]
     out_work = await _openai_translate_multi_segment(
@@ -803,7 +811,7 @@ async def _async_translate_multi(
 
         await asyncio.to_thread(_store)
 
-    return [str(merged[i]) for i in range(len(segments))]
+    return [sanitize_translated_output(str(merged[i])) for i in range(len(segments))]
 
 
 def pack_segment_indices(
@@ -885,6 +893,17 @@ async def translate_segments_batched_async(
     budget = max(1500, int(max_batch) - int(reserve))
     concurrency = max(1, settings.translate_batch_max_concurrency)
     stagger_ms = max(0.0, float(settings.translate_batch_stagger_ms))
+    inflight_cap = max(1, int(settings.translate_openai_max_inflight))
+    if inflight_cap < concurrency:
+        logger.warning(
+            "translate_openai_max_inflight (%s) is below translate_batch_max_concurrency (%s); "
+            "OpenAI calls are capped at %s parallel requests. Set TRANSLATE_OPENAI_MAX_INFLIGHT "
+            "to at least %s for full throughput (or lower TRANSLATE_BATCH_MAX_CONCURRENCY).",
+            inflight_cap,
+            concurrency,
+            inflight_cap,
+            concurrency,
+        )
 
     seg_cap = max(8, int(settings.translate_api_batch_max_segments))
     batches = pack_segment_indices(

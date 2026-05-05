@@ -252,6 +252,8 @@ section.doc-chapter > h2.doc-heading--2:first-of-type {
   color: #171717 !important;
   text-align: justify !important;
   hyphens: auto;
+  white-space: normal;
+  word-break: normal;
   orphans: 3;
   widows: 3;
   margin-top: 0 !important;

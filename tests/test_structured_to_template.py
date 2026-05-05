@@ -54,3 +54,32 @@ def test_structured_to_template_part_and_chapter_chapter_start_subsection_not():
     m = structured_to_document_for_template(doc)
     heads = [b for b in (m.blocks or []) if getattr(b, "type", None) == "heading"]
     assert [b.chapter_start for b in heads] == [True, True, False]
+
+
+def test_structured_to_template_preserves_one_block_per_paragraph_for_pdf_docx():
+    """Each StructuredParagraph stays one output block — matches source paragraph boundaries."""
+    doc = StructuredDocument(
+        title="T",
+        content=[
+            StructuredParagraph(text="First."),
+            StructuredParagraph(text="Second."),
+            StructuredParagraph(text="Third."),
+        ],
+    )
+    m = structured_to_document_for_template(doc)
+    paras = [b for b in (m.blocks or []) if getattr(b, "type", None) == "paragraph"]
+    assert len(paras) == 3
+
+
+def test_structured_to_template_preserves_paragraph_boundaries_before_heading():
+    doc = StructuredDocument(
+        title="T",
+        content=[
+            StructuredParagraph(text="One. Two."),
+            StructuredHeading(level=2, text="Mid"),
+            StructuredParagraph(text="Three."),
+        ],
+    )
+    m = structured_to_document_for_template(doc)
+    types = [getattr(b, "type", None) for b in (m.blocks or [])]
+    assert types == ["paragraph", "heading", "paragraph"]

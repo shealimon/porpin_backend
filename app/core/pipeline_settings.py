@@ -79,12 +79,13 @@ class PipelineSettings(BaseSettings):
         ),
     )
     translate_api_batch_max_input_tokens: int = Field(
-        default=16000,
+        default=24_000,
         ge=1500,
         le=200_000,
         description=(
             "Target max input tokens (segments only) per multi-segment completion; "
-            "prompt/instruction reserve is subtracted automatically."
+            "prompt/instruction reserve is subtracted automatically. "
+            "Higher = fewer HTTP round-trips on long books (watch model context limits)."
         ),
     )
     translate_api_batch_prompt_reserve_tokens: int = Field(
@@ -94,27 +95,27 @@ class PipelineSettings(BaseSettings):
         description="Tokens reserved from each batch budget for system instructions and delimiters.",
     )
     translate_api_batch_max_segments: int = Field(
-        default=28,
+        default=32,
         ge=8,
         le=300,
         validation_alias=AliasChoices("TRANSLATE_API_BATCH_MAX_SEGMENTS"),
         description=(
             "Hard cap on how many segments go into one multi-segment JSON completion. "
             "Large batches (35+) often get extra keys or malformed JSON from the model; "
-            "24–32 is a reliable range."
+            "28–32 is a reliable range for gpt-4o-mini."
         ),
     )
     translate_batch_max_concurrency: int = Field(
-        default=12,
+        default=20,
         ge=1,
         le=512,
         description=(
             "Concurrent multi-segment OpenAI HTTP calls per process (inline prepare + batch path). "
-            "Lower if you see 429 / TPM errors on gpt-4o-mini."
+            "Should match your OpenAI tier TPM/RPM; lower if you see 429s."
         ),
     )
     translate_batch_stagger_ms: float = Field(
-        default=55.0,
+        default=18.0,
         ge=0.0,
         le=5000.0,
         description=(
@@ -123,13 +124,13 @@ class PipelineSettings(BaseSettings):
         ),
     )
     translate_openai_max_inflight: int = Field(
-        default=6,
+        default=20,
         ge=1,
         le=128,
         description=(
             "Max concurrent OpenAI chat.completions HTTP calls per batched translate run. "
-            "Caps total parallelism when JSON batching falls back to many single-segment requests. "
-            "Lower this (e.g. 2–3) if you see 429 / TPM errors on gpt-4o-mini."
+            "If lower than translate_batch_max_concurrency, effective parallelism is limited to this. "
+            "Match translate_batch_max_concurrency for throughput; lower both if you see 429 / TPM errors."
         ),
     )
     translation_progress_pulse_interval_s: float = Field(
@@ -554,7 +555,7 @@ class PipelineSettings(BaseSettings):
         description="Target minimum input tokens per chunk-queue batch (merge small tails).",
     )
     chunk_queue_max_tokens: int = Field(
-        default=2200,
+        default=4200,
         ge=200,
         le=50_000,
         validation_alias=AliasChoices("CHUNK_QUEUE_MAX_TOKENS"),

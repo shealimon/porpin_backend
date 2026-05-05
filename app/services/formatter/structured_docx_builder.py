@@ -80,7 +80,7 @@ def _append_body_node(
     if isinstance(node, StructuredHeading):
         level = max(1, min(9, node.level))
         text = node.text
-        if is_chapter_outline_level(level, chapter_min_level):
+        if is_chapter_outline_level(level, chapter_min_level, heading_text=text):
             p = doc.add_paragraph(style="Heading 1")
             brk = body_started[0]
             _apply_main_heading_paragraph(p, text, page_break_before=brk)

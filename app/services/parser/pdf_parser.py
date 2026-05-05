@@ -11,9 +11,19 @@ import fitz
 
 from app.core.pipeline_settings import get_pipeline_settings
 from app.models.document_models import BlockType, ContentBlock
+from app.services.parser.pdf_running_header import (
+    looks_like_pdf_running_header_line,
+    strip_leading_pdf_navigation_crumbs,
+)
 
 # Cache page dicts for modest page counts to avoid two get_text("dict") passes per page.
 _PDF_TEXTDICT_CACHE_MAX_PAGES = 100
+
+# PyMuPDF font sizes wobble ±~1 pt between spans; avoid treating body lines as headings.
+_PDF_HEADING_FONT_DELTA_SUB = 3.25  # min pt above median body → outline level 2
+_PDF_HEADING_FONT_DELTA_MAJOR = 7.0  # min pt above median body → outline level 1
+# Very long lines are almost never titles; treat as body even if slightly larger.
+_PDF_FONT_HEADING_MAX_WORDS = 22
 
 
 def _collect_span_sizes_from_dict(d_v: dict[str, Any]) -> list[float]:
@@ -122,11 +132,17 @@ def parse_pdf(
     # Run de-duplication before merging so page headers/footers are removed while
     # still isolated lines; then merge and run one more pass for safety.
     deduped_pre_merge = _dedupe_repeated_pdf_fragments(blocks, page_count=page_limit)
-    merged = _merge_short_paragraphs(deduped_pre_merge)
+    # Paragraph merging collapses TOC rows + Preface/Introduction onto one line per page —
+    # breaks structure tagging (Preface/Introduction vanish from translated body).
+    merged = _merge_short_paragraphs(deduped_pre_merge, max_gap=0)
     deduped = _dedupe_repeated_pdf_fragments(merged, page_count=page_limit)
+    no_run_heads = _drop_pdf_running_header_blocks(deduped)
+    stitched = _merge_pdf_emphasis_heading_into_prior_paragraph(no_run_heads)
+    stitched = _merge_pdf_paragraphs_across_page_breaks(stitched)
+    stitched = _strip_leading_nav_crumbs_from_pdf_paragraphs(stitched)
     if timings is not None:
         timings["pdf_text_extract_and_structure_s"] = time.perf_counter() - t_extract0
-    return deduped
+    return stitched
 
 
 def _estimate_body_fontsize(doc: fitz.Document) -> float:
@@ -151,6 +167,70 @@ def _word_count_quick(text: str) -> int:
     return len(re.findall(r"\S+", text or ""))
 
 
+def _looks_like_pdf_inline_emphasis_caps_fragment(text: str | None) -> bool:
+    """Mid-paragraph shouted line (often extracted as its own PDF row due to font wrap).
+
+    Books typeset emphasized dialogue in all caps ending with ``!`` — not structural headings.
+    """
+    if not text:
+        return False
+    t = " ".join(text.split()).strip()
+    if len(t) < 6 or len(t) > 130:
+        return False
+    wc = _word_count_quick(t)
+    if wc < 2 or wc > 14:
+        return False
+    letters = [c for c in t if c.isalpha()]
+    if len(letters) < 4:
+        return False
+    upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
+    if upper_ratio < 0.88:
+        return False
+    if t.endswith("!"):
+        return True
+    if re.search(r"![\"'\u201d\u2019]\s*$", t):
+        return True
+    return False
+
+
+def _prior_paragraph_likely_attaches_caps_emphasis(prev_text: str) -> bool:
+    """Avoid merging real headings after a clearly finished sentence."""
+    t = prev_text.rstrip()
+    if len(t) < 12:
+        return False
+    if t.endswith("."):
+        return False
+    return True
+
+
+def _merge_pdf_emphasis_heading_into_prior_paragraph(
+    blocks: list[ContentBlock],
+) -> list[ContentBlock]:
+    """Fold mistaken HEADING shards back into the previous paragraph for export continuity."""
+    out: list[ContentBlock] = []
+    for b in blocks:
+        if (
+            b.type == BlockType.HEADING
+            and b.text
+            and _looks_like_pdf_inline_emphasis_caps_fragment(b.text)
+            and out
+            and out[-1].type == BlockType.PARAGRAPH
+            and (out[-1].text or "").strip()
+            and _prior_paragraph_likely_attaches_caps_emphasis(out[-1].text or "")
+            and (
+                b.source_page is None
+                or out[-1].source_page is None
+                or b.source_page == out[-1].source_page
+            )
+        ):
+            prev = out[-1]
+            merged = (prev.text or "").rstrip() + " " + b.text.strip()
+            out[-1] = prev.model_copy(update={"text": merged})
+            continue
+        out.append(b)
+    return out
+
+
 def _looks_like_pdf_typographic_heading(
     text: str,
     *,
@@ -161,22 +241,37 @@ def _looks_like_pdf_typographic_heading(
 
     PyMuPDF only gives headings when fontsize clearly exceeds ``body_font``; many PDFs keep
     the same point size so "INTRODUCTION" becomes a PARAGRAPH, merges into body → flat PDF/docx.
+
+    Books often set the *first line* of a paragraph in small caps / all caps (same point size).
+    Those lines match ``upper_ratio`` but read as prose—comma-heavy, many words, clause endings—
+    and must stay PARAGRAPH so translation/PDF export does not split the sentence.
     """
-    if body_font is not None and max_size >= body_font + 1.5:
+    if body_font is not None and max_size >= body_font + _PDF_HEADING_FONT_DELTA_SUB:
         return False
     t = " ".join((text or "").split()).strip()
     if len(t) < 3 or len(t) > 120:
         return False
     wc = _word_count_quick(t)
-    if wc < 1 or wc > 16:
+    # Real typographic headings are almost always short; long all-caps lines are body openings.
+    if wc < 1 or wc > 11:
         return False
     if t.endswith(".") and wc > 5:
+        return False
+    # Clause punctuation ⇒ continuation of a sentence, not a standalone title.
+    if t.endswith(",") or t.endswith(";"):
+        return False
+    # Internal commas with several words ⇒ prose clause (e.g. "...MOVIES, IN PART BECAUSE...").
+    if "," in t and wc >= 6:
         return False
     letters = [c for c in t if c.isalpha()]
     if not letters:
         return False
     upper_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
-    return upper_ratio >= 0.88
+    if upper_ratio >= 0.88:
+        if _looks_like_pdf_inline_emphasis_caps_fragment(t):
+            return False
+        return True
+    return False
 
 
 def _flush_pdf_line_buffer(
@@ -192,8 +287,16 @@ def _flush_pdf_line_buffer(
     if not text:
         return []
     max_sz = max(sz for sz, _ in line_buffer)
-    if max_sz >= body_font + 1.5:
-        level = 1 if max_sz >= body_font + 4 else 2
+    wc_line = _word_count_quick(text)
+    emph_caps = _looks_like_pdf_inline_emphasis_caps_fragment(text)
+    if (
+        not emph_caps
+        and max_sz >= body_font + _PDF_HEADING_FONT_DELTA_SUB
+        and wc_line <= _PDF_FONT_HEADING_MAX_WORDS
+    ):
+        level = (
+            1 if max_sz >= body_font + _PDF_HEADING_FONT_DELTA_MAJOR else 2
+        )
         out.append(
             ContentBlock(
                 type=BlockType.HEADING,
@@ -202,7 +305,7 @@ def _flush_pdf_line_buffer(
                 source_page=source_page,
             )
         )
-    elif _looks_like_pdf_typographic_heading(
+    elif not emph_caps and _looks_like_pdf_typographic_heading(
         text, body_font=body_font, max_size=max_sz
     ):
         out.append(
@@ -286,6 +389,79 @@ def _pdf_plumber_tables_for_plumber_page(
     return regions, table_blocks
 
 
+# Sentence-ending punctuation before optional closing quotes/brackets (PDF → prose).
+_PDF_SENTENCE_COMPLETE_END = re.compile(
+    r"""[.!?…।]['"\u201d\u2019)\]]*\s*$""",
+    flags=re.UNICODE,
+)
+
+
+def _pdf_text_looks_like_sentence_complete(text: str) -> bool:
+    """True when extracted text likely ends a sentence — do not glue next page."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.endswith("..."):
+        return True
+    return bool(_PDF_SENTENCE_COMPLETE_END.search(t))
+
+
+def _looks_like_pdf_toc_leader_or_leaf(text: str) -> bool:
+    """TOC rows (dot leaders + leaf) must not be merged onto the next page's body."""
+    t = " ".join((text or "").split()).strip()
+    if not t or len(t) > 160:
+        return False
+    if re.search(r"\.{3,}", t) and re.search(
+        r"(?:\d{1,4}|[ivxlcdm]{1,10})\s*$", t, flags=re.IGNORECASE
+    ):
+        return True
+    if "..." in t and re.search(
+        r"(?:\d{1,4}|[ivxlcdm]{1,10})\s*$", t, flags=re.IGNORECASE
+    ):
+        return True
+    return False
+
+
+def _merge_pdf_paragraphs_across_page_breaks(blocks: list[ContentBlock]) -> list[ContentBlock]:
+    """Join paragraphs split only by a page break (common in two-up / reflow PDFs).
+
+    PyMuPDF yields one paragraph block per page column; mid-sentence page
+    boundaries become separate ``ContentBlock``s and then separate PDF/DOCX paragraphs
+    after translation. Glue when the prior text clearly does not end a sentence.
+    """
+    if not blocks:
+        return blocks
+    out: list[ContentBlock] = []
+    for b in blocks:
+        if (
+            out
+            and out[-1].type == BlockType.PARAGRAPH
+            and b.type == BlockType.PARAGRAPH
+            and (out[-1].text or "").strip()
+            and (b.text or "").strip()
+            and out[-1].source_page is not None
+            and b.source_page is not None
+            and int(b.source_page) == int(out[-1].source_page) + 1
+            and not _pdf_text_looks_like_sentence_complete((out[-1].text or "").strip())
+            and not _looks_like_pdf_toc_leader_or_leaf((out[-1].text or "").strip())
+            and not _looks_like_pdf_toc_leader_or_leaf((b.text or "").strip())
+        ):
+            prev = out[-1]
+            ptxt = (prev.text or "").rstrip()
+            ntxt = (b.text or "").lstrip()
+            if ptxt.endswith("-"):
+                merged_text = ptxt[:-1].rstrip() + ntxt
+            else:
+                merged_text = ptxt + " " + ntxt
+            merged_text = " ".join(merged_text.split())
+            out[-1] = prev.model_copy(
+                update={"text": merged_text, "source_page": b.source_page}
+            )
+        else:
+            out.append(b)
+    return out
+
+
 def _merge_short_paragraphs(blocks: list[ContentBlock], max_gap: int = 2) -> list[ContentBlock]:
     merged: list[ContentBlock] = []
     i = 0
@@ -353,6 +529,34 @@ def _max_consecutive_page_run(pages: set[int]) -> int:
         else:
             cur = 1
     return best
+
+
+def _drop_pdf_running_header_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
+    out: list[ContentBlock] = []
+    for b in blocks:
+        if b.type in (BlockType.PARAGRAPH, BlockType.LIST, BlockType.HEADING):
+            if b.text and looks_like_pdf_running_header_line(b.text):
+                continue
+        out.append(b)
+    return out
+
+
+def _strip_leading_nav_crumbs_from_pdf_paragraphs(blocks: list[ContentBlock]) -> list[ContentBlock]:
+    """Remove spine-side nav labels glued to the first sentence (``Notes Index Preface …``)."""
+    out: list[ContentBlock] = []
+    for b in blocks:
+        if b.type != BlockType.PARAGRAPH or not b.text:
+            out.append(b)
+            continue
+        stripped = strip_leading_pdf_navigation_crumbs(b.text)
+        if not stripped.strip():
+            out.append(b)
+            continue
+        if stripped == b.text:
+            out.append(b)
+        else:
+            out.append(b.model_copy(update={"text": stripped}))
+    return out
 
 
 def _looks_like_page_number_fragment(text: str) -> bool:

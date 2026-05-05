@@ -19,6 +19,9 @@ from app.models.document_models import (
     SectionAction,
     StructuralTag,
 )
+from app.services.formatter.book_structure import should_exclude_from_exported_toc
+from app.services.parser.pdf_running_header import looks_like_pdf_running_header_line
+from app.utils.translate_filter import count_words
 
 # Distributor / mirror-site lines (e.g. ManyBooks) — omit from output; not author “visit my site”.
 _AUTHOR_SITE_HINT = re.compile(
@@ -120,7 +123,37 @@ def classify_blocks(blocks: list[ContentBlock]) -> list[ClassifiedBlock]:
     for block in blocks:
         # Table of Contents / Contents: keep in output, original text (no translation).
         if block.structural_tag == StructuralTag.TOC:
+            if should_exclude_from_exported_toc(block.text):
+                out.append(
+                    ClassifiedBlock(
+                        block=block.model_copy(update={"structural_tag": None}),
+                        action=SectionAction.OMIT,
+                    )
+                )
+                continue
             out.append(ClassifiedBlock(block=block, action=SectionAction.SKIP))
+            continue
+
+        # Interior PDF runners / TOC bleed (often heading-shaped); never translate or export.
+        if block.text and block.type in (
+            BlockType.PARAGRAPH,
+            BlockType.LIST,
+            BlockType.HEADING,
+        ):
+            if looks_like_pdf_running_header_line(block.text):
+                out.append(ClassifiedBlock(block=block, action=SectionAction.OMIT))
+                continue
+
+        # Title-page imprint spilled outside TOC rows (publisher / translator boilerplate).
+        if (
+            block.structural_tag
+            not in (StructuralTag.TITLE, StructuralTag.AUTHOR, StructuralTag.TOC)
+            and block.text
+            and block.type in (BlockType.PARAGRAPH, BlockType.LIST)
+            and count_words(block.text.strip()) <= 14
+            and should_exclude_from_exported_toc(block.text)
+        ):
+            out.append(ClassifiedBlock(block=block, action=SectionAction.OMIT))
             continue
 
         if block.type == BlockType.HEADING and block.text:

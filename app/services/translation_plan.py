@@ -12,9 +12,14 @@ from app.models.document_models import (
     ClassifiedBlock,
     ContentBlock,
     SectionAction,
+    StructuralTag,
 )
 from app.utils.chunking import chunk_text_respecting_paragraphs, count_tokens
-from app.utils.translate_filter import plan_paragraph_for_translation
+from app.utils.translate_filter import (
+    looks_like_sentence_continuation_line,
+    plan_paragraph_for_translation,
+    sentence_appears_complete,
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,82 @@ class TableBlockWork:
 
 
 BlockWork = SkipBlockWork | TextBlockWork | TableBlockWork
+
+
+def _paragraph_merge_candidate(cb: ClassifiedBlock) -> bool:
+    """Body paragraphs eligible for stitching PDF line shards; TOC/title/author unchanged."""
+    if cb.action != SectionAction.TRANSLATE:
+        return False
+    b = cb.block
+    if b.type != BlockType.PARAGRAPH:
+        return False
+    if not (b.text and b.text.strip()):
+        return False
+    if b.structural_tag in (
+        StructuralTag.TITLE,
+        StructuralTag.AUTHOR,
+        StructuralTag.TOC,
+    ):
+        return False
+    return True
+
+
+def _should_stop_paragraph_merge(prev_merged_text: str, next_text: str) -> bool:
+    """Leave ``next_text`` as its own block when it starts a fresh paragraph."""
+    prev = prev_merged_text.rstrip()
+    nxt = (next_text or "").strip()
+    if not prev:
+        return False
+    if not sentence_appears_complete(prev):
+        return False
+    return not looks_like_sentence_continuation_line(nxt)
+
+
+def _glue_merged_paragraph_text(prev: str, nxt: str) -> str:
+    """Join two shards of the same logical paragraph (preserve real breaks after full stops)."""
+    l = prev.rstrip()
+    r = nxt.lstrip()
+    if sentence_appears_complete(l):
+        if looks_like_sentence_continuation_line(r):
+            return f"{l} {r}"
+        return f"{l}\n\n{r}"
+    return f"{l} {r}"
+
+
+def merge_adjacent_translate_paragraphs(
+    classified: list[ClassifiedBlock],
+) -> list[ClassifiedBlock]:
+    """Collapse consecutive BODY translate-paragraph shards (typical noisy PDF extraction)."""
+    if not classified:
+        return classified
+    out: list[ClassifiedBlock] = []
+    i = 0
+    while i < len(classified):
+        cb = classified[i]
+        if not _paragraph_merge_candidate(cb):
+            out.append(cb)
+            i += 1
+            continue
+        merged_text = cb.block.text.strip()
+        merged_block_template = cb.block
+        j = i + 1
+        while j < len(classified):
+            nb = classified[j]
+            if not _paragraph_merge_candidate(nb):
+                break
+            ntxt = nb.block.text.strip()
+            if _should_stop_paragraph_merge(merged_text, ntxt):
+                break
+            merged_text = _glue_merged_paragraph_text(merged_text, ntxt)
+            j += 1
+        out.append(
+            ClassifiedBlock(
+                block=merged_block_template.model_copy(update={"text": merged_text}),
+                action=SectionAction.TRANSLATE,
+            )
+        )
+        i = j
+    return out
 
 
 def _merge_paragraphs_for_translation_units(
@@ -215,6 +296,8 @@ def build_translation_plan(
     """Flatten all API-bound strings into ``global_jobs``; structure stays in ``block_work``."""
     global_jobs: list[str] = []
     block_work: list[BlockWork] = []
+
+    classified = merge_adjacent_translate_paragraphs(classified)
 
     for i, cb in enumerate(classified):
         if cb.action in (SectionAction.SKIP, SectionAction.OMIT):
