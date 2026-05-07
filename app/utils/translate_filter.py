@@ -78,6 +78,33 @@ def looks_like_sentence_continuation_line(text: str) -> bool:
     return c.islower()
 
 
+_STANDALONE_SECTION_LABEL = re.compile(
+    r"""(?ix)^(?:
+        preface | introduction | foreword | prologue | epilogue |
+        acknowledg(?:e)?ments? | dedication |
+        contents? | table\ of\ contents |
+        (?:part|book)\s+[ivxlcdm\d]+ |
+        chapter\s+\d+ |
+        appendix\s+[a-z0-9]+ |
+        notes? | references? | bibliography | glossary | index
+    )\s*$"""
+)
+
+
+def looks_like_standalone_section_label(text: str) -> bool:
+    """Single-line front/back matter labels without final punctuation (often PDF shards).
+
+    They must not be merged into the following paragraph: ``merge_adjacent_translate_paragraphs``
+    treats no trailing ``.?!`` as incomplete and would glue the next block.
+    """
+    t = " ".join((text or "").split()).strip()
+    if not t or len(t) > 120:
+        return False
+    if _STANDALONE_SECTION_LABEL.match(t):
+        return True
+    return False
+
+
 _BRACKET_NUM = re.compile(r"\[[\d,\s–-]+\]")
 _URL = re.compile(r"https?://|www\.", re.I)
 _FIG_TABLE_SHORT = re.compile(

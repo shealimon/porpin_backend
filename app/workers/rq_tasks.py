@@ -359,7 +359,7 @@ def finalize_document_translation_job(job_id: str) -> None:
         doc_template_id = (
             str(_tpl_raw).strip() if _tpl_raw is not None and str(_tpl_raw).strip() else None
         )
-        segments, batches, block_work = load_manifest_v2(raw_man)
+        segments, batches, block_work, doc_meta = load_manifest_v2(raw_man)
         total, ok, fail = get_job_chunk_counters(job_id)
 
         if len(batches) > 0 and ok + fail < len(batches):
@@ -432,6 +432,7 @@ def finalize_document_translation_job(job_id: str) -> None:
                 translated_segments=merged,
                 output_docx=final_docx,
                 structured_json_path=final_structure,
+                document_metadata=doc_meta,
             )
             docx_s = time.perf_counter() - t_write
             logger.info(
@@ -444,6 +445,7 @@ def finalize_document_translation_job(job_id: str) -> None:
             if resolve_template_type(doc_template_id) == "bilingual":
                 source_structured = build_structured_document(
                     [w.classified for w in block_work],
+                    document_metadata=doc_meta,
                 )
 
             export = job.export_format.lower()

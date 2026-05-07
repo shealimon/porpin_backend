@@ -11,6 +11,7 @@ def test_chapter_like_patterns():
     assert chapter_like_heading_text("CHAPTER 1")
     assert chapter_like_heading_text("chapter twelve · foo")
     assert chapter_like_heading_text("PART TWO")
+    assert chapter_like_heading_text("1")
     assert chapter_like_heading_text("1.2 The Emotion Default")
     assert not chapter_like_heading_text("Always An Entrepreneur")
     assert not chapter_like_heading_text("")

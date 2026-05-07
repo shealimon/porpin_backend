@@ -37,6 +37,7 @@ def render_bilingual_document_html(
     css = indented_css_for_template(template_id)
     ctx = {
         "title": tm.title,
+        "subtitle": tm.subtitle,
         "themeId": template_id,
         "css": css,
         "use_chapters": False,

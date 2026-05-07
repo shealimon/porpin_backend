@@ -17,7 +17,17 @@ from app.services.document_template_render.models import (
     BlockParagraphModel,
     DocumentForTemplate,
 )
+from app.services.formatter.book_structure import (
+    looks_like_merged_toc_body_spill,
+    looks_like_printed_toc_heading_noise,
+    looks_like_printed_toc_leader_row,
+)
+from app.services.formatter.book_heading_display import (
+    format_book_main_heading_display,
+    is_book_milestone_heading_label,
+)
 from app.services.formatter.chapter_heading_policy import (
+    chapter_like_heading_text,
     chapter_start_level,
     is_chapter_outline_level,
 )
@@ -45,6 +55,146 @@ def _normalize_text(text: str) -> str:
     return _WS.sub(" ", (text or "").strip())
 
 
+def _split_compacted_decimal_outline_paragraph(text: str) -> list[str] | None:
+    """Split PDF-reflowed subsection inventory: ``1.1 A 1.2 B 1.3 C`` → separate items."""
+    t = _normalize_text(text)
+    if len(t) < 30:
+        return None
+    if len(re.findall(r"\b\d+\.\d+\b", t)) < 3:
+        return None
+    parts = re.split(r"\s+(?=\d+\.\d+\s)", t)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) < 3:
+        return None
+    for p in parts:
+        if not re.match(r"^\d+\.\d+\b", p):
+            return None
+    return parts
+
+
+_LIST_ENUM_PREFIX = re.compile(r"^\d+\s*[\.)]\s+", re.UNICODE)
+
+
+def _strip_leading_list_enumeration(item: str) -> str:
+    t = _normalize_text(item)
+    t = _LIST_ENUM_PREFIX.sub("", t).strip()
+    return t
+
+
+def _subsection_major_minor_from_inventory_item(item: str) -> tuple[int, int] | None:
+    """``1. 1.1 Title`` / ``1.1 Title`` → ``(1, 1)``."""
+    t = _strip_leading_list_enumeration(item)
+    m = re.match(r"^(\d+)\.(\d+)\b", t)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _part_major_from_part_opener_heading(heading: str) -> int | None:
+    """``Part 2. Title`` → 2; lone ``1`` / ``3`` on part splash page → that number."""
+    t = _normalize_text(heading or "")
+    if not t:
+        return None
+    m = re.match(r"(?i)^part\s+(\d{1,3})\b", t)
+    if m:
+        return int(m.group(1))
+    if re.match(r"^\d{1,3}$", t):
+        return int(t)
+    return None
+
+
+def _heading_precedes_part_subsection_inventory(
+    heading: StructuredHeading,
+    items: list[str],
+    ordered: bool,
+) -> bool:
+    """Part splash pages repeat subsection titles as a list — drop (Contents already lists them)."""
+    if not ordered or len(items) < 3:
+        return False
+    if getattr(heading, "content_tag", None) == "toc":
+        return False
+    opener = _normalize_text(heading.text or "")
+    if not opener:
+        return False
+    if not (
+        re.match(r"(?i)^part\s+\d+", opener) or re.match(r"^\d{1,3}$", opener)
+    ):
+        return False
+    expected_major = _part_major_from_part_opener_heading(opener)
+    if expected_major is None:
+        return False
+    majors: list[int] = []
+    for it in items:
+        if len(_normalize_text(it)) > 175:
+            return False
+        mm = _subsection_major_minor_from_inventory_item(it)
+        if mm is None:
+            return False
+        majors.append(mm[0])
+    if len(set(majors)) != 1 or majors[0] != expected_major:
+        return False
+    return True
+
+
+def _redundant_part_inventory_list_indices(doc: StructuredDocument) -> set[int]:
+    """Indices of ``StructuredList`` nodes that only duplicate the outline from Contents."""
+    skip: set[int] = set()
+    c = doc.content
+    for i in range(1, len(c)):
+        raw = c[i]
+        if not isinstance(raw, StructuredList):
+            continue
+        if getattr(raw, "content_tag", None) == "toc":
+            continue
+        prev = c[i - 1]
+        if not isinstance(prev, StructuredHeading):
+            continue
+        if getattr(prev, "content_tag", None) == "toc":
+            continue
+        items = [_normalize_text(x) for x in raw.items if _normalize_text(x)]
+        if _heading_precedes_part_subsection_inventory(prev, items, raw.ordered):
+            skip.add(i)
+    return skip
+
+
+def _toc_entry_text_is_prose_noise(text: str) -> bool:
+    """Drop body-like lines mistakenly exported as headings from generated Contents."""
+    t = (text or "").strip()
+    if len(t) < 90:
+        return False
+    from app.utils.translate_filter import count_words
+
+    wc = count_words(t)
+    if wc < 20:
+        return False
+    punct = t.count(".") + t.count("?") + t.count("!")
+    if punct >= 2:
+        return True
+    if wc >= 48 and punct >= 1:
+        return True
+    return False
+
+
+def _finalize_toc_entries(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Remove prose headings and duplicate (text, level) pairs from auto Contents."""
+    out: list[dict[str, object]] = []
+    seen: set[tuple[str, int]] = set()
+    for e in entries:
+        text = str(e.get("text") or "").strip()
+        if not text:
+            continue
+        if _toc_entry_text_is_prose_noise(text):
+            continue
+        norm = _normalize_text(text).lower()
+        lvl = max(2, min(6, int(e.get("level") or 2)))
+        key = (norm, lvl)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(e)
+    return out
+
+
 def _append_paragraph_dedup(blocks: list[_Block], text: str) -> None:
     """Skip immediate duplicate paragraphs to avoid PDF spam from noisy parsers/OCR."""
     t = _normalize_text(text)
@@ -54,6 +204,26 @@ def _append_paragraph_dedup(blocks: list[_Block], text: str) -> None:
         if _normalize_text(blocks[-1].text) == t:
             return
     blocks.append(BlockParagraphModel(text=t))
+
+
+def _append_body_paragraph_or_outline_list(blocks: list[_Block], text: str) -> None:
+    """Paragraph, or a reflowed decimal outline (1.1 … 1.2 …) as an ordered list."""
+    t = _normalize_text(text)
+    if not t:
+        return
+    if looks_like_merged_toc_body_spill(t):
+        return
+    if looks_like_printed_toc_leader_row(t):
+        return
+    if looks_like_printed_toc_heading_noise(t):
+        return
+    split = _split_compacted_decimal_outline_paragraph(t)
+    if split:
+        items = [_normalize_text(x) for x in split if _normalize_text(x)]
+        if len(items) >= 3:
+            blocks.append(BlockListModel(items=items, ordered=True))
+            return
+    _append_paragraph_dedup(blocks, t)
 
 
 def _unique_anchor(base: str, used: set[str]) -> str:
@@ -76,6 +246,8 @@ def _toc_entries_from_blocks(blocks: list[_Block]) -> list[dict[str, object]]:
             continue
         if not b.anchor:
             continue
+        if looks_like_printed_toc_heading_noise(b.text):
+            continue
         headings.append(b)
 
     if not headings:
@@ -91,14 +263,16 @@ def _toc_entries_from_blocks(blocks: list[_Block]) -> list[dict[str, object]]:
     if not chapter_heads:
         min_lvl = min(int(h.level or 2) for h in headings)
         chosen = [h for h in headings if int(h.level or 2) == min_lvl]
-        return [
-            {
-                "text": h.text,
-                "anchor": h.anchor,
-                "level": max(2, min(6, int(h.level or 2))),
-            }
-            for h in chosen
-        ]
+        return _finalize_toc_entries(
+            [
+                {
+                    "text": h.text,
+                    "anchor": h.anchor,
+                    "level": max(2, min(6, int(h.level or 2))),
+                }
+                for h in chosen
+            ]
+        )
 
     chapter_lvl = min(int(h.level or 2) for h in chapter_heads)
     sub_lvl = min(6, chapter_lvl + 1)
@@ -138,7 +312,7 @@ def _toc_entries_from_blocks(blocks: list[_Block]) -> list[dict[str, object]]:
         if len(out) >= MAX_ENTRIES:
             break
 
-    return out
+    return _finalize_toc_entries(out)
 
 
 def _outline_levels_from_structured(doc: StructuredDocument) -> list[int]:
@@ -149,9 +323,42 @@ def _outline_levels_from_structured(doc: StructuredDocument) -> list[int]:
     ]
 
 
+def _heading_render_flags(
+    raw: StructuredHeading,
+    chapter_lvl: int | None,
+) -> tuple[bool, bool, int]:
+    """(chapter_start, is_subheading, template_h_level).
+
+    Blocks tagged ``kind="heading"`` from structure detection are **section** titles. They must
+    not inherit chapter-opener layout just because their outline level equals ``chapter_lvl`` —
+    that was collapsing subsections into chapter pages. Only *chapter-like* wording (or explicit
+    ``kind="chapter"``) opens a chapter block.
+
+    Subheadings use a **fixed** deep HTML tier so they never pick up ``doc-heading--3/4`` section
+    styles meant for real headings.
+    """
+    heading_text = _normalize_text(raw.text)
+    hk = getattr(raw, "kind", None)
+    base_tpl = _heading_level_to_template_level(raw.level)
+    if hk == "chapter":
+        return True, False, base_tpl
+    if hk == "subheading":
+        return False, True, 5
+    if hk == "heading":
+        return chapter_like_heading_text(heading_text), False, base_tpl
+    chapter_start = is_chapter_outline_level(
+        raw.level,
+        chapter_lvl,
+        heading_text=heading_text,
+    )
+    is_sub = int(raw.level) >= 3 and not chapter_start
+    return chapter_start, is_sub, base_tpl
+
+
 def structured_to_document_for_template(doc: StructuredDocument) -> DocumentForTemplate:
     """Map normalized structure to the API model used by server-side and client document templates."""
     title = _normalize_text(doc.title or "") or "Document"
+    subtitle = _normalize_text(doc.subtitle or "") or None
     outline_lvls = _outline_levels_from_structured(doc)
     chapter_lvl = chapter_start_level(outline_lvls)
     blocks: list[_Block] = []
@@ -160,7 +367,10 @@ def structured_to_document_for_template(doc: StructuredDocument) -> DocumentForT
         t = _normalize_text(line or "")
         if t:
             _append_paragraph_dedup(blocks, t)
-    for raw in doc.content:
+    skip_list_idx = _redundant_part_inventory_list_indices(doc)
+    for i, raw in enumerate(doc.content):
+        if i in skip_list_idx:
+            continue
         # Do not render extracted TOC text verbatim; we generate a clean TOC from real headings.
         if getattr(raw, "content_tag", None) == "toc":
             continue
@@ -168,26 +378,43 @@ def structured_to_document_for_template(doc: StructuredDocument) -> DocumentForT
             heading_text = _normalize_text(raw.text)
             if not heading_text:
                 continue
+            if looks_like_printed_toc_leader_row(heading_text):
+                continue
+            if looks_like_printed_toc_heading_noise(heading_text):
+                continue
+            chapter_start, is_sub, tpl_lvl = _heading_render_flags(raw, chapter_lvl)
+            heading_text = format_book_main_heading_display(heading_text)
             base = _slugify(heading_text)
             anchor = _unique_anchor(base, used_anchors)
+            milestone_section = (
+                is_book_milestone_heading_label(raw.text)
+                and not is_sub
+                and not chapter_start
+            )
             blocks.append(
                 BlockHeadingModel(
                     text=heading_text,
-                    level=_heading_level_to_template_level(raw.level),
-                    chapter_start=is_chapter_outline_level(
-                        raw.level, chapter_lvl, heading_text=heading_text
-                    ),
+                    level=tpl_lvl,
+                    chapter_start=chapter_start,
+                    is_subheading=is_sub,
+                    milestone_section=milestone_section,
                     anchor=anchor,
                 )
             )
         elif isinstance(raw, StructuredParagraph):
             p = _normalize_text(raw.text)
             if p:
-                _append_paragraph_dedup(blocks, p)
+                if raw.is_quote:
+                    blocks.append(BlockParagraphModel(text=p, is_quote=True))
+                else:
+                    _append_body_paragraph_or_outline_list(blocks, p)
         elif isinstance(raw, StructuredList):
+            items = [_normalize_text(x) for x in list(raw.items) if _normalize_text(x)]
+            if items and all(looks_like_printed_toc_leader_row(x) for x in items):
+                continue
             blocks.append(
                 BlockListModel(
-                    items=[_normalize_text(x) for x in list(raw.items) if _normalize_text(x)],
+                    items=items,
                     ordered=raw.ordered,
                 )
             )
@@ -198,7 +425,7 @@ def structured_to_document_for_template(doc: StructuredDocument) -> DocumentForT
                     _append_paragraph_dedup(blocks, line)
     if not blocks:
         blocks = [BlockParagraphModel(text="")]
-    return DocumentForTemplate(title=title, blocks=blocks)
+    return DocumentForTemplate(title=title, subtitle=subtitle, blocks=blocks)
 
 
 def render_structured_document_html(
@@ -218,75 +445,4 @@ def render_structured_document_html(
             return render_document_html(m, "report")
         return render_bilingual_document_html(source_doc, doc, resolved)
     m = structured_to_document_for_template(doc)
-
-    # Build a TOC from the final rendered block list (post-normalization). This guarantees every
-    # TOC href points to an existing `id=...` in the emitted HTML.
-    from app.services.document_template_render.render import _get_jinja_env  # type: ignore
-    from app.services.document_template_render.css import indented_css_for_template
-    from app.services.document_template_render.context import build_template_context
-
-    ctx = build_template_context(m, resolved, indented_css_for_template(resolved))
-
-    toc: list[dict[str, object]] = []
-    try:
-        # `ctx["blocks"]` is a list of dicts (normalized for template view).
-        if ctx.get("use_chapters"):
-            # Chapters mode is rare for structured docs, but handle it anyway.
-            # Only TOC chapter titles (and optional one-level subheads) are supported here.
-            chapters = list(ctx.get("chapters") or [])
-            for ch in chapters:
-                title = str((ch or {}).get("displayTitle") or (ch or {}).get("title") or "").strip()
-                anchor = str((ch or {}).get("anchor") or "").strip()
-                if title and anchor:
-                    toc.append({"text": title, "anchor": anchor, "level": 2})
-        else:
-            blocks_view = list(ctx.get("blocks") or [])
-            # Reuse the same TOC policy, but operate on the final block dicts.
-            headings: list[dict[str, object]] = [
-                b
-                for b in blocks_view
-                if isinstance(b, dict)
-                and b.get("type") == "heading"
-                and str(b.get("text") or "").strip()
-                and str(b.get("anchor") or "").strip()
-            ]
-            # Convert to temporary BlockHeadingModel-like objects is overkill; replicate policy.
-            chapter_heads = [h for h in headings if bool(h.get("chapterStart"))]
-            if not chapter_heads:
-                min_lvl = min(int(h.get("hLevel") or 2) for h in headings) if headings else 2
-                chosen = [h for h in headings if int(h.get("hLevel") or 2) == min_lvl]
-            else:
-                chapter_lvl = min(int(h.get("hLevel") or 2) for h in chapter_heads)
-                sub_lvl = min(6, chapter_lvl + 1)
-                chosen = []
-                current_chapter_open = False
-                for h in headings:
-                    lvl = int(h.get("hLevel") or 2)
-                    is_chapter = bool(h.get("chapterStart")) and lvl == chapter_lvl
-                    if is_chapter:
-                        current_chapter_open = True
-                    elif current_chapter_open:
-                        if lvl != sub_lvl:
-                            continue
-                    if not is_chapter and not current_chapter_open:
-                        continue
-                    chosen.append(h)
-            seen: set[str] = set()
-            for h in chosen[:120]:
-                a = str(h.get("anchor") or "").strip()
-                if not a or a in seen:
-                    continue
-                seen.add(a)
-                toc.append(
-                    {
-                        "text": str(h.get("text") or "").strip(),
-                        "anchor": a,
-                        "level": max(2, min(6, int(h.get("hLevel") or 2))),
-                    }
-                )
-    except Exception:
-        toc = []
-
-    if toc:
-        ctx["toc"] = toc
-    return _get_jinja_env().get_template("layout.j2").render(**ctx)
+    return render_document_html(m, template_id)

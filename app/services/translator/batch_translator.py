@@ -104,6 +104,10 @@ MULTI_SEGMENT_RULES_PREFIX = """You will translate multiple labeled segments fro
 
 Roman script only (never Devanagari). Prefer common English words Indians use (e.g. problem, time, start, idea, important, change, system, result, question, understand, help, need, feel, think, right, wrong). Only convert difficult, formal, or unnatural English into simple Hinglish where needed. Natural spoken/storytelling tone; light Hindi-in-Roman for flow and relatability only—not to replace English.
 
+Numbers: for spelled-out quantities, use Arabic numerals + English units (e.g. “22 years”; “more than seventy-five thousand” → “75 thousand se zyada” or “more than 75 thousand”). Do not use Hindi/Urdu number words for those values (wrong: “bees saal” for 22; wrong: “pachaas hazaar” for 75,000). Never change magnitude—when unsure, digits only.
+
+Proper nouns, book titles, brands, self-help/business terms: leave in English as in the single-segment rules.
+
 Strict: avoid pure/formal/Sanskrit-type or bookish exam/news Hindi; if a word feels uncommon in daily speech, do not use it; if unsure Hindi vs English, choose simple English. Smooth, connected sentences—not literal, robotic, or stiff; no overuse of Hindi. Target ~70–80% simple English, ~20–30% light conversational Hinglish, 0% pure Hindi/Sanskrit, natural storytelling flow. Slight rewrites for clarity/flow are ok if meaning is unchanged.
 
 No stitched output: translate each segment wholly; avoid leaving untouched English clauses mixed with rewritten text. Do not echo the same idea twice (English+Hinglish) unless it is natural idiomatic repetition.

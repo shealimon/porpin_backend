@@ -54,6 +54,17 @@ class HtmlToPdfRequest(BaseModel):
             "Defaults to the API app directory for bundled fonts."
         ),
     )
+    pdf_page_size: str | None = Field(
+        default=None,
+        description="Optional PDF trim: `a4` or `a5` (trade paperback). Uses server default from WEASYPRINT_PDF_PAGE_SIZE when omitted.",
+    )
+    pdf_book_preset: str | None = Field(
+        default=None,
+        description=(
+            "Optional book layout: `modern` (premium, WeasyPrint *book.css* style) or `classical` "
+            "(*book-classical.css*, fixed small trim). Uses WEASYPRINT_BOOK_PRESET when omitted."
+        ),
+    )
 
     @model_validator(mode="after")
     def _html_xor_document(self) -> Self:
@@ -89,6 +100,8 @@ async def html_to_pdf(request: Request, body: HtmlToPdfRequest) -> Response:
             html_to_pdf_bytes,
             html,
             base_url=body.base_url,
+            page_size=body.pdf_page_size,
+            book_preset=body.pdf_book_preset,
         )
     except RuntimeError as e:
         detail = str(e)

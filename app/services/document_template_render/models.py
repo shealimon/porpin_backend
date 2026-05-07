@@ -49,6 +49,8 @@ class BlockHeadingModel(BaseModel):
     text: str
     level: int | None = Field(default=None, ge=2, le=6)
     chapter_start: bool = False
+    is_subheading: bool = False
+    milestone_section: bool = False
     # Optional stable anchor id for PDF/HTML cross-references (e.g. Table of Contents links).
     anchor: str | None = None
 
@@ -56,6 +58,7 @@ class BlockHeadingModel(BaseModel):
 class BlockParagraphModel(BaseModel):
     type: Literal["paragraph"] = "paragraph"
     text: str
+    is_quote: bool = False
 
 
 class BlockListModel(BaseModel):
@@ -74,6 +77,7 @@ class DocumentForTemplate(BaseModel):
     """Same shapes as the frontend: chaptered, sequenced (blocks), or flat (headings/paragraphs/lists)."""
 
     title: str
+    subtitle: str | None = None
     chapters: list[DocumentChapterModel] | None = None
     blocks: list[SequencedBlockModel] | None = None
     headings: list[DocumentHeadingModel] | None = None

@@ -17,6 +17,7 @@ from app.models.document_models import (
 from app.utils.chunking import chunk_text_respecting_paragraphs, count_tokens
 from app.utils.translate_filter import (
     looks_like_sentence_continuation_line,
+    looks_like_standalone_section_label,
     plan_paragraph_for_translation,
     sentence_appears_complete,
 )
@@ -73,10 +74,14 @@ def _paragraph_merge_candidate(cb: ClassifiedBlock) -> bool:
 
 def _should_stop_paragraph_merge(prev_merged_text: str, next_text: str) -> bool:
     """Leave ``next_text`` as its own block when it starts a fresh paragraph."""
-    prev = prev_merged_text.rstrip()
     nxt = (next_text or "").strip()
+    if looks_like_standalone_section_label(nxt):
+        return True
+    prev = prev_merged_text.rstrip()
     if not prev:
         return False
+    if looks_like_standalone_section_label(prev):
+        return True
     if not sentence_appears_complete(prev):
         return False
     return not looks_like_sentence_continuation_line(nxt)

@@ -24,7 +24,32 @@ def test_inject_print_css_inserts_before_head_close():
     out = inject_print_css(html)
     assert "weasyprint-print" in out
     assert "@page" in out
+    assert "@page :left" in out
+    assert "string(chapter_title)" in out
     assert out.index("weasyprint-print") < out.lower().index("</head>")
+
+
+def test_print_layout_css_a5_trim():
+    from app.services.formatter.html_to_pdf_weasyprint import _print_layout_css
+
+    assert "148mm 210mm" in _print_layout_css(page_size="a5")
+    assert "size: A4" in _print_layout_css(page_size="a4")
+
+
+def test_print_layout_css_classical_preset():
+    from app.services.formatter.html_to_pdf_weasyprint import _print_layout_css
+
+    css = _print_layout_css(book_preset="classical")
+    assert "110mm 170mm" in css
+    assert "@top-right" in css
+    assert "font-variant: small-caps" in css
+
+
+def test_inject_print_css_classical_running_heads():
+    html = "<!DOCTYPE html><html><head><meta charset=utf-8></head><body><p>a</p></body></html>"
+    out = inject_print_css(html, book_preset="classical")
+    assert "@top-left" in out
+    assert "@page :blank" in out
 
 def test_template_chapter_opener_markup():
     model = DocumentForTemplate(

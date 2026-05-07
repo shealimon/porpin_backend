@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Self
 
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -200,6 +200,37 @@ class PipelineSettings(BaseSettings):
         ),
         validation_alias=AliasChoices("PDF_USE_PDFPLUMBER_FOR_TABLES"),
     )
+    weasyprint_pdf_page_size: str = Field(
+        default="a4",
+        description=(
+            "WeasyPrint PDF trim for translation and server HTML→PDF: 'a4' or 'a5' (148×210mm). "
+            "Set via WEASYPRINT_PDF_PAGE_SIZE in backend/.env."
+        ),
+        validation_alias=AliasChoices("WEASYPRINT_PDF_PAGE_SIZE"),
+    )
+
+    @field_validator("weasyprint_pdf_page_size", mode="after")
+    @classmethod
+    def _normalize_weasyprint_pdf_page_size(cls, v: str) -> str:
+        s = (v or "a4").strip().lower()
+        return s if s in ("a4", "a5") else "a4"
+
+    weasyprint_book_preset: str = Field(
+        default="modern",
+        description=(
+            "WeasyPrint book layout: 'modern' (premium, bottom folios, respects a4/a5) or "
+            "'classical' (classic trade, 110×170mm trim, top running heads). "
+            "Set via WEASYPRINT_BOOK_PRESET in backend/.env."
+        ),
+        validation_alias=AliasChoices("WEASYPRINT_BOOK_PRESET"),
+    )
+
+    @field_validator("weasyprint_book_preset", mode="after")
+    @classmethod
+    def _normalize_weasyprint_book_preset(cls, v: str) -> str:
+        s = (v or "modern").strip().lower()
+        return s if s in ("modern", "classical") else "modern"
+
     # --- Async jobs / scale-out (optional) ---
     database_url: str | None = Field(
         default=None,

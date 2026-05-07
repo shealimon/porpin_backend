@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from app.models.document_models import ClassifiedBlock
+from app.models.document_semantics import DocumentMetadata
 from app.services.translation_plan import (
     BlockWork,
     ParagraphPiece,
@@ -92,6 +93,7 @@ def dump_manifest_v2(
     block_work: list[BlockWork],
     document_template_id: str | None = None,
     translation_target: str | None = None,
+    document_metadata: DocumentMetadata | None = None,
 ) -> dict[str, Any]:
     d: dict[str, Any] = {
         "version": 2,
@@ -103,16 +105,24 @@ def dump_manifest_v2(
         d["document_template_id"] = str(document_template_id).strip()
     if translation_target and str(translation_target).strip():
         d["translation_target"] = str(translation_target).strip().lower()
+    if document_metadata is not None:
+        d["document_metadata"] = document_metadata.model_dump(mode="json")
     return d
 
 
-def load_manifest_v2(data: dict[str, Any]) -> tuple[list[str], list[list[int]], list[BlockWork]]:
+def load_manifest_v2(
+    data: dict[str, Any],
+) -> tuple[list[str], list[list[int]], list[BlockWork], DocumentMetadata | None]:
     if int(data.get("version", 0)) != 2:
         raise ValueError("unsupported manifest version")
     segments = list(data["segments"])
     batches = [list(map(int, b)) for b in data["batches"]]
     bw = [block_work_from_jsonable(x) for x in data["block_work"]]
-    return segments, batches, bw
+    meta_raw = data.get("document_metadata")
+    meta = None
+    if meta_raw:
+        meta = DocumentMetadata.model_validate(meta_raw)
+    return segments, batches, bw, meta
 
 
 def manifest_json_bytes(manifest: dict[str, Any]) -> bytes:

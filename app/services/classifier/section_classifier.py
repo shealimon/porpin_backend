@@ -1,7 +1,9 @@
 """Rule-based section labeling: TRANSLATE vs SKIP vs OMIT.
 
 - **TOC / Contents** (``StructuralTag.TOC``): ``SKIP`` — show in output, no translation.
-- **index, glossary, references, appendix, copyright** (and related *section titles*): ``OMIT`` —
+- **Part N splash / mini-TOC** (Part title + multiple ``N.M`` subsection rows): ``OMIT`` — excluded
+  from translated DOCX/PDF (duplicate outline only).
+- **index, glossary, references, notes, copyright(s), appendix** (and related *section titles*): ``OMIT`` —
   no translation API and omitted from rebuilt DOCX / PDF. Section titles are matched with
   **tight patterns** (not loose substrings) so normal prose is not affected. Regions run until
   the next heading at the same or higher level — **no** early exit on long paragraphs (indexes
@@ -19,6 +21,7 @@ from app.models.document_models import (
     SectionAction,
     StructuralTag,
 )
+from app.services.classifier.part_inventory_omit import part_subsection_inventory_indices
 from app.services.formatter.book_structure import should_exclude_from_exported_toc
 from app.services.parser.pdf_running_header import looks_like_pdf_running_header_line
 from app.utils.translate_filter import count_words
@@ -59,6 +62,9 @@ _BACK_MATTER_SECTION_HEADING = re.compile(
     ^(
         index(es)? |
         (subject|author)\s+index |
+        notes? |
+        endnotes? |
+        footnotes? |
         references? |
         reference\s+list |
         works?\s+cited |
@@ -67,12 +73,12 @@ _BACK_MATTER_SECTION_HEADING = re.compile(
         glossary(\s+of\s+[\w\s\-:,'’/&;]+)? |
         appendix(\s+[\w\s\-:,'’/]+)? |
         annex(\s+[\w\s\-:,'’/]+)? |
+        copyrights? |
         copyright( notice| information| page| ©)? |
         legal notices? |
         imprint |
         list\s+of\s+figures |
         list\s+of\s+tables |
-        acknowledg(e)?ments? |
         about\s+the\s+authors?
     )$
     """,
@@ -116,11 +122,23 @@ def classify_blocks(blocks: list[ContentBlock]) -> list[ClassifiedBlock]:
     (index, glossary, references, appendix, copyright, …). All blocks under that heading are
     ``OMIT`` until a heading at the same or higher outline level. Long paragraphs do **not**
     end the region (indexes/glossaries can span many pages).
+
+    Printed **Part N** splash pages (large part number + title + three or more ``N.M`` subsection
+    rows) are ``OMIT`` so the export can start at real body (e.g. Preface) without duplicate outline.
     """
     out: list[ClassifiedBlock] = []
     skip_until_level: int | None = None
+    part_inventory_omit = part_subsection_inventory_indices(blocks)
 
-    for block in blocks:
+    for i, block in enumerate(blocks):
+        if i in part_inventory_omit:
+            out.append(
+                ClassifiedBlock(
+                    block=block.model_copy(update={"structural_tag": None}),
+                    action=SectionAction.OMIT,
+                )
+            )
+            continue
         # Table of Contents / Contents: keep in output, original text (no translation).
         if block.structural_tag == StructuralTag.TOC:
             if should_exclude_from_exported_toc(block.text):

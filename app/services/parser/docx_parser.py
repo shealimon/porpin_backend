@@ -140,6 +140,22 @@ def _infer_list_kind(text: str) -> ListKind:
     return "bullet"
 
 
+def _para_explicit_bold_char_fraction(para: Paragraph) -> float:
+    """Share of characters in runs marked bold=True (Theme/font inheritance ignored)."""
+    total = 0
+    bold = 0
+    for r in para.runs:
+        raw = r.text or ""
+        if not raw.strip():
+            continue
+        total += len(raw)
+        if r.bold is True:
+            bold += len(raw)
+    if total <= 0:
+        return 0.0
+    return bold / total
+
+
 def _paragraph_to_block(para: Paragraph) -> ContentBlock | None:
     text = para.text.strip()
     if not text:
@@ -154,6 +170,11 @@ def _paragraph_to_block(para: Paragraph) -> ContentBlock | None:
             text=text,
             list_kind=_infer_list_kind(text),
         )
+    wc = _word_count_str(text)
+    bold_frac = _para_explicit_bold_char_fraction(para)
+    if bold_frac >= 0.82 and 1 <= wc <= 15:
+        level = 2 if wc <= 6 and bold_frac >= 0.9 else 3
+        return ContentBlock(type=BlockType.HEADING, text=text, level=level)
     return ContentBlock(type=BlockType.PARAGRAPH, text=text)
 
 

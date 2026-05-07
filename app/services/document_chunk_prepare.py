@@ -27,6 +27,9 @@ from app.services.translation_plan import build_translation_plan
 from app.services.translation_plan_serde import dump_manifest_v2, manifest_json_bytes
 from app.services.translation_target import normalize_translation_target
 from app.services.classifier.section_classifier import classify_blocks
+from app.services.document_pipeline.stages.semantic_enrichment import (
+    enrich_classified_blocks,
+)
 from app.utils.token_batching import pack_segment_indices_by_tokens
 from app.utils.word_batching import pack_segment_indices_by_words
 
@@ -248,6 +251,7 @@ def prepare_document_chunk_jobs(
 
     t_cls = time.perf_counter()
     classified = classify_blocks(blocks)
+    classified, doc_meta = enrich_classified_blocks(classified)
     cls_wall = time.perf_counter() - t_cls
     breakdown["classify_s"] = cls_wall
     logger.info(
@@ -295,6 +299,7 @@ def prepare_document_chunk_jobs(
         block_work=block_work,
         document_template_id=document_template_id,
         translation_target=tt,
+        document_metadata=doc_meta,
     )
     manifest_path.write_bytes(manifest_json_bytes(manifest))
 

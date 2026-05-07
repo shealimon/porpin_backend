@@ -27,26 +27,35 @@ _CHAPTER_PREFIX = re.compile(
     r"^\s*(?:chapter|chap)\s*(\d+)\s*[:.\-–—]?\s*(.*)\s*$",
     re.IGNORECASE,
 )
+_ROMAN_CHAPTER_PREFIX = re.compile(
+    r"^\s*(?:chapter|chap)\s*([ivxlcdm]{1,8})\s*[:.\-–—]?\s*(.*)\s*$",
+    re.IGNORECASE,
+)
 
 
-def _split_chapter_title(text: str | None) -> tuple[int | None, str | None]:
+def _split_chapter_title(text: str | None) -> tuple[int | str | None, str | None]:
     """If the title looks like 'Chapter 1: Title', return (1, 'Title').
 
-    If it is only 'Chapter 1', return (1, None) to avoid duplicating number + title.
-    Otherwise return (None, original_text).
+    Roman labels like ``Chapter IV — …`` return (``\"IV\"``, rest). If no split applies,
+    return (None, original_text) so the template still shows the full line in the title.
     """
     t = (text or "").strip()
     if not t:
         return (None, None)
     m = _CHAPTER_PREFIX.match(t)
-    if not m:
-        return (None, t)
-    try:
-        n = int(m.group(1))
-    except Exception:
-        n = None
-    rest = (m.group(2) or "").strip() or None
-    return (n, rest)
+    if m:
+        try:
+            n = int(m.group(1))
+        except Exception:
+            n = None
+        rest = (m.group(2) or "").strip() or None
+        return (n, rest)
+    m = _ROMAN_CHAPTER_PREFIX.match(t)
+    if m:
+        label = (m.group(1) or "").upper()
+        rest = (m.group(2) or "").strip() or None
+        return (label, rest)
+    return (None, t)
 
 
 def _chapter_to_view(ch: DocumentChapterModel) -> dict[str, Any]:
@@ -88,9 +97,16 @@ def _block_to_view(
                 out["displayText"] = display
         if b.anchor:
             out["anchor"] = b.anchor
+        if getattr(b, "is_subheading", False):
+            out["subheading"] = True
+        if getattr(b, "milestone_section", False):
+            out["milestoneSection"] = True
         return out
     if isinstance(b, BlockParagraphModel):
-        return {"type": "paragraph", "text": b.text}
+        out_p: dict[str, Any] = {"type": "paragraph", "text": b.text}
+        if getattr(b, "is_quote", False):
+            out_p["isQuote"] = True
+        return out_p
     return {
         "type": "list",
         "items": list(b.items),
@@ -128,6 +144,7 @@ def build_template_context(
 ) -> dict[str, Any]:
     """Data for `layout.j2` (title, themeId, css, use_chapters, chapters, blocks)."""
     title = model.title
+    subtitle = model.subtitle
     if model.chapters is not None:
         # Defensive: some callers may accidentally provide both `chapters` and `blocks`.
         # Prefer chapters only when they contain meaningful content; otherwise fall back to blocks.
@@ -141,6 +158,7 @@ def build_template_context(
         if has_meaningful_chapters:
             return {
                 "title": title,
+                "subtitle": subtitle,
                 "themeId": template_id,
                 "css": css,
                 "use_chapters": True,
@@ -170,6 +188,7 @@ def build_template_context(
                 if (
                     nxt.get("type") == "heading"
                     and not nxt.get("chapterStart")
+                    and not nxt.get("subheading")
                     and isinstance(nxt.get("text"), str)
                     and str(nxt.get("text") or "").strip()
                 ):
@@ -206,6 +225,7 @@ def build_template_context(
             blocks_view.append(v)
         return {
             "title": title,
+            "subtitle": subtitle,
             "themeId": template_id,
             "css": css,
             "use_chapters": False,
@@ -214,6 +234,7 @@ def build_template_context(
         }
     return {
         "title": title,
+        "subtitle": subtitle,
         "themeId": template_id,
         "css": css,
         "use_chapters": False,

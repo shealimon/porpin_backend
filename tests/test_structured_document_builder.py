@@ -74,7 +74,8 @@ def test_omit_blocks_excluded():
     assert doc.content[0].text == "kept"
 
 
-def test_toc_tag_on_nodes():
+def test_skip_toc_blocks_excluded_from_structured_content():
+    """SKIP (printed TOC) does not appear in StructuredDocument — avoids duplicate with generated TOC."""
     classified = [
         ClassifiedBlock(
             block=ContentBlock(
@@ -86,8 +87,7 @@ def test_toc_tag_on_nodes():
         ),
     ]
     doc = build_structured_document(classified)
-    assert len(doc.content) == 1
-    assert doc.content[0].content_tag == "toc"
+    assert len(doc.content) == 0
 
 
 def test_paragraph_collapses_hard_line_breaks_inside_stanza():

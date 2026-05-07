@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from app.core.pipeline_settings import get_pipeline_settings
 from app.models.document_models import ClassifiedBlock, ContentBlock
+from app.models.document_semantics import DocumentMetadata
 from app.observability.pipeline_performance import PipelinePerfReport
 from app.services.document_pipeline.orchestrator import run_translate_export_docx_pipeline
 from app.services.document_pipeline.paragraph_overlap_dedupe import (
@@ -79,13 +80,17 @@ def write_translated_docx(
     translated_segments: list[str],
     output_docx: Path,
     structured_json_path: Path | None = None,
+    document_metadata: DocumentMetadata | None = None,
 ) -> list[ClassifiedBlock]:
     """Reassemble classified blocks and write DOCX (in-place or rebuild); optional sidecar JSON."""
     translated_classified = reassemble_from_plan(block_work, translated_segments)
     translated_classified = dedupe_consecutive_redundant_translate_paragraphs(
         translated_classified,
     )
-    structured = build_structured_document(translated_classified)
+    structured = build_structured_document(
+        translated_classified,
+        document_metadata=document_metadata,
+    )
     write_classified_to_docx(
         input_path,
         translated_classified,

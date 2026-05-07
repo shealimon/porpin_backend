@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 ContentTag = Literal["body", "toc"]
 
+HeadingSemanticKind = Literal["chapter", "heading", "subheading"]
+
 
 class StructuredHeading(BaseModel):
     """Document heading; ``level`` 1 is the primary outline level, larger numbers nest deeper."""
@@ -16,12 +18,20 @@ class StructuredHeading(BaseModel):
     level: int = Field(ge=1, le=9)
     text: str
     content_tag: ContentTag = "body"
+    kind: HeadingSemanticKind | None = Field(
+        default=None,
+        description="chapter | heading | subheading — from structure detection before translation.",
+    )
 
 
 class StructuredParagraph(BaseModel):
     type: Literal["paragraph"] = "paragraph"
     text: str
     content_tag: ContentTag = "body"
+    is_quote: bool = Field(
+        default=False,
+        description="Blockquote-style rhythm in PDF/HTML when True.",
+    )
 
 
 class StructuredList(BaseModel):
@@ -50,5 +60,10 @@ class StructuredDocument(BaseModel):
 
     schema_version: int = 1
     title: str | None = None
+    subtitle: str | None = None
     authors: list[str] = Field(default_factory=list)
+    document_type: str | None = Field(
+        default=None,
+        description="Coarse genre from pre-translate inference (book, article, educational, …).",
+    )
     content: list[StructuredBlock] = Field(default_factory=list)

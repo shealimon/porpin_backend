@@ -67,6 +67,14 @@
   color: var(--doc-muted);
 }
 
+.doc-root.doc-theme--ebook .doc-heading--milestone.doc-heading--2,
+.doc-root.doc-theme--ebook .doc-heading--milestone.doc-heading--3 {
+  display: block;
+  clear: both;
+  margin-top: 2.75rem;
+  page-break-after: avoid;
+}
+
 .doc-root.doc-theme--ebook .doc-paragraph {
   margin: 0 0 1.1em;
   text-align: justify;

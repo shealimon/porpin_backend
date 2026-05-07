@@ -19,6 +19,34 @@ def chapter_like_heading_text(text: str | None) -> bool:
     low = t.lower()
     if re.match(r"^(chapter|part|appendix|annex)\b", low):
         return True
+    # PDFs sometimes split a chapter opener across lines:
+    #   HEADING: "1"
+    #   HEADING: "The Beginning"
+    # Treat short numeric-only headings as chapter-like so downstream rendering can
+    # merge the following title line into the chapter opener.
+    if re.match(r"^\d{1,3}$", t):
+        return True
+    # Roman-numeral chapters: "CHAPTER IV", "Chapter XII".
+    if re.match(r"^chapter\s+[ivxlcdm]{1,8}\b", low):
+        return True
+    # Named arcs / didactic sections (books + some coaching material).
+    if re.match(
+        r"^(law|narrative|lesson|unit|lecture|episode|module|segment)\s+(\d+|[a-z]+)\b",
+        low,
+    ):
+        return True
+    # Books, acts, numbered sections (avoid mid-sentence "Section …" via start anchor + short prefix).
+    if re.match(r"^book\s+([ivxlcdm]{1,8}|\d{1,3})\b", low):
+        return True
+    if re.match(
+        r"^section\s+\d{1,3}\b(?!\.\d)(?!\s+(?:of|in|on|for|that|which|the|a|an)\s)",
+        low,
+    ):
+        return True
+    if re.match(r"^act\s+[ivxlcdm]{1,8}\b", low):
+        return True
+    if re.match(r"^principle\s+\d{1,3}\b", low):
+        return True
     # Interior numbering without the word "Chapter" (e.g. "1.2 The Emotion Default").
     if re.match(r"^\d{1,2}\.\d{1,3}\s+\S", t):
         return True

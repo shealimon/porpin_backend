@@ -1,12 +1,16 @@
 {% macro render_block(block) -%}
 {% if block.type == "heading" %}
 {% if block.chapterStart %}
-<div class="doc-chapter-page"><h{{ block.hLevel }}{% if block.anchor %} id="{{ block.anchor }}"{% endif %} class="doc-heading doc-heading--{{ block.hLevel }} doc-chapter-start">{{ block.text }}</h{{ block.hLevel }}></div>
+<div class="doc-chapter-page"><h{{ block.hLevel }}{% if block.anchor %} id="{{ block.anchor }}"{% endif %} class="doc-heading doc-heading--{{ block.hLevel }} doc-chapter-start{% if block.milestoneSection %} doc-heading--milestone{% endif %}">{{ block.text }}</h{{ block.hLevel }}></div>
 {% else %}
-<h{{ block.hLevel }}{% if block.anchor %} id="{{ block.anchor }}"{% endif %} class="doc-heading doc-heading--{{ block.hLevel }}">{{ block.text }}</h{{ block.hLevel }}>
+{% if block.subheading %}
+<h5{% if block.anchor %} id="{{ block.anchor }}"{% endif %} class="doc-heading doc-heading--sub">{{ block.text }}</h5>
+{% else %}
+<h{{ block.hLevel }}{% if block.anchor %} id="{{ block.anchor }}"{% endif %} class="doc-heading doc-heading--{{ block.hLevel }}{% if block.milestoneSection %} doc-heading--milestone{% endif %}">{{ block.text }}</h{{ block.hLevel }}>
+{% endif %}
 {% endif %}
 {% elif block.type == "paragraph" %}
-  <p class="doc-paragraph">{{ block.text }}</p>
+  <p class="doc-paragraph{% if block.isQuote %} doc-paragraph--quote{% endif %}">{{ block.text }}</p>
 {% else %}
   {% if block.ordered %}
   <ol class="doc-list doc-list--ordered">{% for it in block['items'] %}<li class="doc-list-item">{{ it }}</li>{% endfor %}</ol>

@@ -25,6 +25,9 @@ from app.services.document_pipeline.stages.export_docx import (
     write_classified_to_docx,
     write_structured_sidecar,
 )
+from app.services.document_pipeline.stages.semantic_enrichment import (
+    enrich_classified_blocks,
+)
 from app.services.document_pipeline.stages.translate import translate_classified_blocks
 from app.services.translation_target import normalize_translation_target
 from app.services.structured_document_builder import (
@@ -133,9 +136,19 @@ def run_translate_export_docx_pipeline(
 
     t_classify = time.perf_counter()
     classified = classify_source_blocks(blocks)
+    t_sem = time.perf_counter()
+    classified, doc_meta = enrich_classified_blocks(classified)
+    sem_s = time.perf_counter() - t_sem
+    report.add("semantic_enrichment_s", sem_s)
     classify_s = time.perf_counter() - t_classify
     report.add("classify_s", classify_s)
-    logger.info("stage=classify blocks=%s wall_s=%.3f", len(classified), classify_s)
+    report.meta["document_type"] = doc_meta.document_type
+    logger.info(
+        "stage=classify+semantics blocks=%s wall_s=%.3f enrich_s=%.3f",
+        len(classified),
+        classify_s,
+        sem_s,
+    )
     bump(22)
 
     settings = get_pipeline_settings()
@@ -183,7 +196,10 @@ def run_translate_export_docx_pipeline(
     if on_progress is not None or progress_job_id:
         docx_pulse_th = threading.Thread(target=_docx_write_pulse_loop, daemon=True)
         docx_pulse_th.start()
-    structured = build_structured_document(tr_classified)
+    structured = build_structured_document(
+        tr_classified,
+        document_metadata=doc_meta,
+    )
     t_write = time.perf_counter()
     try:
         fmt = write_classified_to_docx(

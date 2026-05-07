@@ -10,7 +10,7 @@ from typing import Any
 import fitz
 
 from app.core.pipeline_settings import get_pipeline_settings
-from app.models.document_models import BlockType, ContentBlock
+from app.models.document_models import BlockType, ContentBlock, PdfLineHints
 from app.services.parser.pdf_running_header import (
     looks_like_pdf_running_header_line,
     strip_leading_pdf_navigation_crumbs,
@@ -91,8 +91,9 @@ def parse_pdf(
                     d = page.get_text("dict")
                 # Per-page state: PDF y is page-local; carrying last_y across pages can
                 # merge unrelated lines when coordinates happen to align.
-                line_buffer: list[tuple[float, str]] = []
+                line_buffer: list[tuple[float, str, float, float, float]] = []
                 last_y: float | None = None
+                last_flush_y1: float | None = None
 
                 for block in d.get("blocks", []):
                     if block.get("type") != 0:
@@ -110,18 +111,38 @@ def parse_pdf(
                         text = " ".join(span_texts).strip()
                         if not text:
                             continue
-                        y = float(bbox[1])
+                        bold_strength = _line_bold_strength(line)
+                        y0 = float(bbox[1])
+                        y1 = float(bbox[3])
                         if _inside_any_table(bbox, table_regions):
                             continue
-                        if last_y is not None and abs(y - last_y) > 14:
-                            blocks.extend(
-                                _flush_pdf_line_buffer(line_buffer, body_font, page_num)
+                        if last_y is not None and abs(y0 - last_y) > 14:
+                            gap_before = None
+                            if line_buffer and last_flush_y1 is not None:
+                                gap_before = min(ln[3] for ln in line_buffer) - last_flush_y1
+                            flushed = _flush_pdf_line_buffer(
+                                line_buffer,
+                                body_font,
+                                page_num,
+                                gap_before_pt=gap_before,
                             )
+                            blocks.extend(flushed)
+                            if flushed and flushed[-1].pdf_hints is not None:
+                                last_flush_y1 = flushed[-1].pdf_hints.y1
                             line_buffer = []
-                        last_y = y
-                        line_buffer.append((max_size, text))
+                        last_y = y0
+                        line_buffer.append((max_size, text, bold_strength, y0, y1))
 
-                blocks.extend(_flush_pdf_line_buffer(line_buffer, body_font, page_num))
+                gap_end = None
+                if line_buffer and last_flush_y1 is not None:
+                    gap_end = min(ln[3] for ln in line_buffer) - last_flush_y1
+                flushed = _flush_pdf_line_buffer(
+                    line_buffer,
+                    body_font,
+                    page_num,
+                    gap_before_pt=gap_end,
+                )
+                blocks.extend(flushed)
                 for tb in table_tail_blocks:
                     blocks.append(tb.model_copy(update={"source_page": page_num}))
         finally:
@@ -165,6 +186,41 @@ def _estimate_body_fontsize(doc: fitz.Document) -> float:
 
 def _word_count_quick(text: str) -> int:
     return len(re.findall(r"\S+", text or ""))
+
+
+def _span_looks_bold(span: dict[str, Any]) -> bool:
+    """Infer bold from font name or MuPDF/PyMuPDF font flags (bit 4 = bold)."""
+    font = (span.get("font") or "").lower()
+    if any(
+        k in font
+        for k in (
+            "bold",
+            "-bd",
+            "black",
+            "heavy",
+            "semibold",
+            "demibold",
+        )
+    ):
+        return True
+    flags = int(span.get("flags") or 0)
+    return bool(flags & 16)
+
+
+def _line_bold_strength(line: dict[str, Any]) -> float:
+    """Share of non-empty span characters that sit in bold-looking spans (0–1)."""
+    bold_n = 0
+    total_n = 0
+    for sp in line.get("spans", []):
+        raw = sp.get("text") or ""
+        if not raw.strip():
+            continue
+        total_n += len(raw)
+        if _span_looks_bold(sp):
+            bold_n += len(raw)
+    if total_n <= 0:
+        return 0.0
+    return bold_n / total_n
 
 
 def _looks_like_pdf_inline_emphasis_caps_fragment(text: str | None) -> bool:
@@ -274,22 +330,67 @@ def _looks_like_pdf_typographic_heading(
     return False
 
 
+def _looks_like_pdf_title_inventory_or_toc_spill(text: str | None) -> bool:
+    """Printed TOC / nav spine merged into one line — not a real section heading."""
+    if not text:
+        return False
+    t = " ".join(text.split()).strip()
+    if len(t) < 60:
+        return False
+    q = t.count("?")
+    if q >= 3:
+        return True
+    wc = _word_count_quick(t)
+    if len(t) >= 100 and q >= 2 and wc >= 35:
+        return True
+    ch = len(re.findall(r"(?i)\bchapter\s+\d+", t))
+    if ch >= 2 and wc >= 25:
+        return True
+    return False
+
+
 def _flush_pdf_line_buffer(
-    line_buffer: list[tuple[float, str]],
+    line_buffer: list[tuple[float, str, float, float, float]],
     body_font: float,
     source_page: int,
+    *,
+    gap_before_pt: float | None = None,
 ) -> list[ContentBlock]:
     if not line_buffer:
         return []
     out: list[ContentBlock] = []
-    lines = [t for _, t in line_buffer]
+    lines = [t for _, t, _, _, _ in line_buffer]
     text = " ".join(lines).strip()
     if not text:
         return []
-    max_sz = max(sz for sz, _ in line_buffer)
+    max_sz = max(sz for sz, _, _, _, _ in line_buffer)
+    bold_strengths = [br for _, _, br, _, _ in line_buffer]
+    bold_max = max(bold_strengths) if bold_strengths else 0.0
+    bold_avg = sum(bold_strengths) / len(bold_strengths) if bold_strengths else 0.0
+    bold_signal = max(bold_max, bold_avg)
+    min_y0 = min(ln[3] for ln in line_buffer)
+    max_y1 = max(ln[4] for ln in line_buffer)
+    hints = PdfLineHints(
+        font_pt_max=max_sz,
+        bold_fraction=bold_signal,
+        lines_merged=len(line_buffer),
+        y0=min_y0,
+        y1=max_y1,
+        gap_before_pt=gap_before_pt,
+        body_font_pt=body_font,
+    )
     wc_line = _word_count_quick(text)
     emph_caps = _looks_like_pdf_inline_emphasis_caps_fragment(text)
-    if (
+    if _looks_like_pdf_title_inventory_or_toc_spill(text):
+        out.append(
+            ContentBlock(
+                type=BlockType.PARAGRAPH,
+                text=text,
+                source_page=source_page,
+                pdf_hints=hints,
+            )
+        )
+    elif (
         not emph_caps
         and max_sz >= body_font + _PDF_HEADING_FONT_DELTA_SUB
         and wc_line <= _PDF_FONT_HEADING_MAX_WORDS
@@ -303,6 +404,7 @@ def _flush_pdf_line_buffer(
                 text=text,
                 level=level,
                 source_page=source_page,
+                pdf_hints=hints,
             )
         )
     elif not emph_caps and _looks_like_pdf_typographic_heading(
@@ -314,6 +416,29 @@ def _flush_pdf_line_buffer(
                 text=text,
                 level=2,
                 source_page=source_page,
+                pdf_hints=hints,
+            )
+        )
+    elif (
+        not emph_caps
+        and not _looks_like_list(text)
+        and len(line_buffer) <= 2
+        and wc_line <= 11
+        and len(text) <= 160
+        and max_sz < body_font + _PDF_HEADING_FONT_DELTA_SUB
+        and bold_signal >= 0.88
+        and not (text.rstrip().endswith((".", "!", "?")) and wc_line > 9)
+        and not ("," in text and wc_line >= 8)
+    ):
+        # Same point size as body but strongly bold — only for short runs (not TOC dumps).
+        level = 2 if wc_line <= 6 else 3
+        out.append(
+            ContentBlock(
+                type=BlockType.HEADING,
+                text=text,
+                level=level,
+                source_page=source_page,
+                pdf_hints=hints,
             )
         )
     elif _looks_like_list(text):
@@ -324,19 +449,23 @@ def _flush_pdf_line_buffer(
                 text=text,
                 source_page=source_page,
                 list_kind="ordered" if ordered else "bullet",
+                pdf_hints=hints,
             )
         )
     else:
         out.append(
-            ContentBlock(type=BlockType.PARAGRAPH, text=text, source_page=source_page)
+            ContentBlock(
+                type=BlockType.PARAGRAPH,
+                text=text,
+                source_page=source_page,
+                pdf_hints=hints,
+            )
         )
     return out
 
 
 def _looks_like_list(text: str) -> bool:
     t = text.lstrip()
-    import re
-
     return bool(re.match(r"^[-*•]\s+", t) or re.match(r"^\d+[\.)]\s+", t))
 
 
@@ -455,7 +584,11 @@ def _merge_pdf_paragraphs_across_page_breaks(blocks: list[ContentBlock]) -> list
                 merged_text = ptxt + " " + ntxt
             merged_text = " ".join(merged_text.split())
             out[-1] = prev.model_copy(
-                update={"text": merged_text, "source_page": b.source_page}
+                update={
+                    "text": merged_text,
+                    "source_page": b.source_page,
+                    "pdf_hints": None,
+                }
             )
         else:
             out.append(b)
@@ -469,17 +602,6 @@ def _merge_short_paragraphs(blocks: list[ContentBlock], max_gap: int = 2) -> lis
         b = blocks[i]
         if b.type != BlockType.PARAGRAPH or not b.text:
             merged.append(b)
-            i += 1
-            continue
-        if _looks_like_pdf_typographic_heading(b.text, body_font=None, max_size=0.0):
-            merged.append(
-                ContentBlock(
-                    type=BlockType.HEADING,
-                    text=b.text.strip(),
-                    level=2,
-                    source_page=b.source_page,
-                )
-            )
             i += 1
             continue
         parts = [b.text]
@@ -498,6 +620,7 @@ def _merge_short_paragraphs(blocks: list[ContentBlock], max_gap: int = 2) -> lis
                     type=BlockType.PARAGRAPH,
                     text=" ".join(parts),
                     source_page=b.source_page,
+                    pdf_hints=b.pdf_hints,
                 )
             )
             i = j

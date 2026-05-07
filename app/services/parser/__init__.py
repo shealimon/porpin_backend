@@ -3,6 +3,7 @@ from pathlib import Path
 
 from app.models.document_models import ContentBlock
 from app.services.formatter.book_structure import apply_book_structure_tags
+from app.services.parser.document_structure_refinement import refine_document_structure
 from app.services.parser.docx_parser import parse_docx
 from app.services.parser.epub_parser import parse_epub
 from app.services.parser.image_parser import is_image_path, parse_image
@@ -32,6 +33,7 @@ def parse_document(
     else:
         raise ValueError(f"Unsupported document type: {suffix}")
     apply_book_structure_tags(blocks)
+    refine_document_structure(blocks)
     if timings is not None:
         timings["parse_document_total_s"] = time.perf_counter() - t0
     return blocks
@@ -45,4 +47,5 @@ __all__ = [
     "parse_image",
     "parse_pdf",
     "parse_txt",
+    "refine_document_structure",
 ]

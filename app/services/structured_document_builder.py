@@ -12,8 +12,10 @@ from app.models.document_models import (
     SectionAction,
     StructuralTag,
 )
+from app.models.document_semantics import DocumentMetadata
 from app.models.structured_document import (
     ContentTag,
+    HeadingSemanticKind,
     StructuredDocument,
     StructuredHeading,
     StructuredList,
@@ -89,6 +91,23 @@ def _partition_front_matter(
     return title, author, rest
 
 
+def _pop_subtitle_from_tail(tail: list[ClassifiedBlock]) -> tuple[str | None, list[ClassifiedBlock]]:
+    """Lift ``semantic_role=subtitle`` blocks into a single string; drop them from body flow."""
+    lines: list[str] = []
+    kept: list[ClassifiedBlock] = []
+    for item in tail:
+        if item.action == SectionAction.OMIT:
+            continue
+        b = item.block
+        if getattr(b, "semantic_role", None) == "subtitle":
+            t = _clean_text(b.text or "")
+            if t:
+                lines.append(t)
+            continue
+        kept.append(item)
+    return ("\n".join(lines) if lines else None), kept
+
+
 def _infer_ordered_from_items(items: list[str]) -> bool:
     for it in items:
         if re.match(r"^\d+[\.)]\s+", it.lstrip()):
@@ -126,6 +145,12 @@ def _list_items_and_ordered(block: ContentBlock) -> tuple[list[str], bool]:
     return items, ordered
 
 
+def _heading_kind_from_role(role: str | None) -> HeadingSemanticKind | None:
+    if role in ("chapter", "heading", "subheading"):
+        return role  # type: ignore[return-value]
+    return None
+
+
 def _block_to_structured(
     item: ClassifiedBlock,
     *,
@@ -137,11 +162,13 @@ def _block_to_structured(
             level=max(1, min(9, b.level)),
             text=_clean_text(b.text),
             content_tag=content_tag,
+            kind=_heading_kind_from_role(getattr(b, "semantic_role", None)),
         )
     if b.type == BlockType.PARAGRAPH and b.text:
         return StructuredParagraph(
             text=_clean_text(b.text),
             content_tag=content_tag,
+            is_quote=getattr(b, "semantic_role", None) == "quote",
         )
     if b.type == BlockType.LIST and b.text:
         items, ordered = _list_items_and_ordered(b)
@@ -162,7 +189,11 @@ def _block_to_structured(
     return None
 
 
-def build_structured_document(classified: list[ClassifiedBlock]) -> StructuredDocument:
+def build_structured_document(
+    classified: list[ClassifiedBlock],
+    *,
+    document_metadata: DocumentMetadata | None = None,
+) -> StructuredDocument:
     # Safety net: template/PDF paths must not show PDF echo duplicates even if a caller skipped translate-time dedupe.
     from app.services.document_pipeline.paragraph_overlap_dedupe import (
         dedupe_consecutive_redundant_translate_paragraphs,
@@ -172,10 +203,15 @@ def build_structured_document(classified: list[ClassifiedBlock]) -> StructuredDo
     title_items, author_items, tail = _partition_front_matter(classified)
     title = _merge_title_lines(title_items)
     authors = _author_lines(author_items)
+    subtitle, tail = _pop_subtitle_from_tail(tail)
 
     content: list = []
     for item in tail:
         if item.action == SectionAction.OMIT:
+            continue
+        # TOC is classified SKIP: never copy printed/nav TOC into structured export/HTML —
+        # headings-based TOC is added separately when rendering.
+        if item.action == SectionAction.SKIP:
             continue
         tag: ContentTag = (
             "toc" if item.block.structural_tag == StructuralTag.TOC else "body"
@@ -184,7 +220,13 @@ def build_structured_document(classified: list[ClassifiedBlock]) -> StructuredDo
         if node is not None:
             content.append(node)
 
-    return StructuredDocument(title=title, authors=authors, content=content)
+    return StructuredDocument(
+        title=title,
+        subtitle=subtitle,
+        authors=authors,
+        document_type=(document_metadata.document_type if document_metadata else None),
+        content=content,
+    )
 
 
 def structured_json_path_for_docx(docx_path: Path) -> Path:
@@ -195,9 +237,11 @@ def structured_json_path_for_docx(docx_path: Path) -> Path:
 def write_structured_document_json(
     classified: list[ClassifiedBlock],
     out_path: Path,
+    *,
+    document_metadata: DocumentMetadata | None = None,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = build_structured_document(classified)
+    doc = build_structured_document(classified, document_metadata=document_metadata)
     out_path.write_text(
         doc.model_dump_json(indent=2),
         encoding="utf-8",

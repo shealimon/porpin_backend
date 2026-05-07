@@ -66,7 +66,39 @@ def test_merge_respects_period_lowercase_continuation_after_split():
     assert "then kept walking" in out[0].block.text
 
 
-def test_merge_skips_structural_front_matter_and_toc_slots():
+def test_merge_keeps_preface_and_introduction_separate_from_body():
+    blocks = [
+        ClassifiedBlock(
+            block=ContentBlock(type=BlockType.PARAGRAPH, text="Some preface body text here."),
+            action=SectionAction.TRANSLATE,
+        ),
+        ClassifiedBlock(
+            block=ContentBlock(type=BlockType.PARAGRAPH, text="Preface"),
+            action=SectionAction.TRANSLATE,
+        ),
+        ClassifiedBlock(
+            block=ContentBlock(type=BlockType.PARAGRAPH, text="Maine August 2001 mein kaam shuru kiya."),
+            action=SectionAction.TRANSLATE,
+        ),
+        ClassifiedBlock(
+            block=ContentBlock(type=BlockType.PARAGRAPH, text="Introduction"),
+            action=SectionAction.TRANSLATE,
+        ),
+        ClassifiedBlock(
+            block=ContentBlock(
+                type=BlockType.PARAGRAPH,
+                text="what happens in ordinary moments determines your future.",
+            ),
+            action=SectionAction.TRANSLATE,
+        ),
+    ]
+    out = merge_adjacent_translate_paragraphs(blocks)
+    parts = [cb.block.text.strip() for cb in out]
+    assert "Preface" in parts
+    assert "Introduction" in parts
+    assert any("Some preface body" in p for p in parts)
+    assert not any("Preface Maine" in p.replace("\n\n", " ") for p in parts)
+    assert not any("Introduction what happens" in p.replace("\n\n", " ") for p in parts)
     body = ContentBlock(type=BlockType.PARAGRAPH, text="Runs on")
     title = ContentBlock(
         type=BlockType.PARAGRAPH,
